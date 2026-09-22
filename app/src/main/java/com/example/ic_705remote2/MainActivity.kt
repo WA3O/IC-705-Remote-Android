@@ -210,16 +210,17 @@ class MainActivity : Activity() {
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(32)
             )
+        // Put the entire application UI immediately below the title banner.
+        // No large top spacer is used, so all controls move upward.
         titleBannerParams.topMargin = dp(36)
         root.addView(titleBanner, titleBannerParams)
 
-        // Preserve the current working vertical position of the controls.
-        // The spacer is now BELOW the banner so the banner touches the top.
+        // Keep only a small gap below the banner.
         root.addView(
             topSpacer,
             android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(90)
+                dp(8)
             )
         )
 
@@ -973,6 +974,7 @@ class MainActivity : Activity() {
         // Dark theme text: keep all button, label, and settings text
         // readable against the dark background.
         applyDarkTextColors(root)
+        updateConnectionButtonColors(false)
 
         mainTabButton.performClick()
     }
@@ -994,9 +996,29 @@ class MainActivity : Activity() {
 
         if (view is android.view.ViewGroup) {
             for (i in 0 until view.childCount) {
-                applyDarkTextColors(view.getChildAt(i))
-            }
+                applyDarkTextColors(view.getChildAt(i))            }
         }
+    }
+
+    private fun updateConnectionButtonColors(isConnected: Boolean) {
+        if (!::connectButton.isInitialized || !::disconnectButton.isInitialized) return
+
+        if (isConnected) {
+            // Connected: CONNECT becomes green and DISCONNECT becomes red.
+            connectButton.backgroundTintList =
+                ColorStateList.valueOf(Color.rgb(0, 150, 0))
+            disconnectButton.backgroundTintList =
+                ColorStateList.valueOf(Color.rgb(190, 0, 0))
+        } else {
+            // Disconnected: CONNECT becomes red and DISCONNECT returns to black.
+            connectButton.backgroundTintList =
+                ColorStateList.valueOf(Color.rgb(190, 0, 0))
+            disconnectButton.backgroundTintList =
+                ColorStateList.valueOf(Color.BLACK)
+        }
+
+        connectButton.setTextColor(Color.WHITE)
+        disconnectButton.setTextColor(Color.WHITE)
     }
 
     private fun addBandButtonRow(
@@ -1012,15 +1034,23 @@ class MainActivity : Activity() {
             button.text = label
             button.isEnabled = false
             button.setOnClickListener {
+                // Update the app's working frequency immediately when a band
+                // button is pressed. This lets the 500 Hz / 1 kHz tuning
+                // buttons use the new band immediately, without requiring
+                // another manual SET FREQUENCY press.
                 frequencyHz = hz
+
                 frequencyEdit.setText(hz.toString())
+
                 if (::frequencyLabelView.isInitialized) {
                     frequencyLabelView.text =
                         "Frequency: ${formatFrequency(hz)}"
                 }
+
                 if (::scopeView.isInitialized) {
                     scopeView.centerFrequencyHz = hz
                 }
+
                 setFrequencyFromUi()
             }
 
@@ -1368,6 +1398,7 @@ class MainActivity : Activity() {
             signalMeterLabel.text = "Signal: S0 (0)"
             signalMeterBar.progress = 0
             signalMeterBar.progressTintList = ColorStateList.valueOf(Color.rgb(0, 190, 0))
+            updateConnectionButtonColors(true)
         }
         startSignalMeterPolling()
         appendLog("")
@@ -1396,11 +1427,28 @@ class MainActivity : Activity() {
             appendLog("AUDIO START FAILED: ${e.message}")
         }
 
-        // Spectrum data is deliberately OFF at connect time to conserve
-        // network bandwidth. Press SPECTRUM ON after the connection is up.
-        updateScopeInfo(
-            "Spectrum: OFF — press SPECTRUM ON to receive IC-705 scope data"
-        )
+        // Start the IC-705 spectrum automatically after the control,
+        // serial/CI-V, and audio paths are established.
+        //
+        // startSpectrumScope() sends the verified six-command SPECTRUM ON
+        // sequence:
+        //   27 10 01
+        //   27 11 01
+        //   27 12 00
+        //   27 13 00
+        //   27 14 00 00
+        //   27 15 00 <half-span>
+        //
+        // No 27 00 polling is used. The IC-705 sends 27 00 scope frames
+        // automatically after the scope is enabled.
+        try {
+            startSpectrumScope()
+        } catch (e: Exception) {
+            appendLog("SPECTRUM AUTO-START FAILED: ${e.message}")
+            updateScopeInfo(
+                "Spectrum: automatic start failed — press SPECTRUM ON"
+            )
+        }
 
         while (running) {
             Thread.sleep(250)
@@ -1947,8 +1995,7 @@ class MainActivity : Activity() {
             ) {
                 it.size >= 16 &&
                         (it[0].toInt() and 0xFF) == 0x10 &&
-                        (it[4].toInt() and 0xFF) == 0x04 &&
-                        (it[5].toInt() and 0xFF) == 0x00
+                        (it[4].toInt() and 0xFF) == 0x04 &&                        (it[5].toInt() and 0xFF) == 0x00
             }
 
         if (pkt4 == null) {
@@ -2947,8 +2994,7 @@ class MainActivity : Activity() {
 
     private fun sendCivSetFrequency(hz: Long) {
         val civ = ByteArray(12)
-        civ[0] = 0xFE.toByte()
-        civ[1] = 0xFE.toByte()
+        civ[0] = 0xFE.toByte()        civ[1] = 0xFE.toByte()
         civ[2] = 0xA4.toByte()
         civ[3] = 0xE0.toByte()
         civ[4] = 0x25.toByte()
@@ -3166,28 +3212,54 @@ class MainActivity : Activity() {
             val chunk = data.copyOfRange(payloadStart, payloadStart + declaredLength)
             scopeLastCivBytes = chunk.size
 
-            // IC-705 WLAN scope: raw 27 00 ... FD record embedded anywhere in C1.
+            // IC-705 WLAN scope: the proven diagnostic program receives a
+            // complete 27 00 ... FD scope record inside each C1 packet.
+            // The complete raw scope record is exactly 493 bytes:
+            //   27 00 + 490-byte payload + FD
+            // Do not use the surrounding FE FE E0 A4 bytes for the length.
             var marker = -1
-            for (i in 0 until maxOf(0, chunk.size - 2)) {
+            for (i in 0 until chunk.size - 1) {
                 if ((chunk[i].toInt() and 0xFF) == 0x27 &&
-                    (chunk[i + 1].toInt() and 0xFF) == 0x00 &&
-                    (chunk[i + 2].toInt() and 0xFF) == 0x00) {
+                    (chunk[i + 1].toInt() and 0xFF) == 0x00) {
                     marker = i
                     break
                 }
             }
+
             if (marker >= 0) {
-                var fd = -1
-                for (i in marker + 3 until chunk.size) {
-                    if ((chunk[i].toInt() and 0xFF) == 0xFD) { fd = i; break }
+                val expectedEnd = marker + 493
+
+                if (expectedEnd <= chunk.size &&
+                    (chunk[expectedEnd - 1].toInt() and 0xFF) == 0xFD) {
+
+                    val rawScope = chunk.copyOfRange(marker, expectedEnd)
+
+                    scopeRaw27Frames++
+                    scopeCivFrames++
+                    processSpectrumScopeFrame(
+                        rawScope.copyOfRange(2, rawScope.size - 1)
+                    )
+                    return
                 }
-                if (fd > marker) {
+
+                // Fallback for a fragmented/variable transport packet.
+                // This is not used by the known-good IC-705 LAN capture,
+                // but preserves the existing buffering path.
+                var fd = -1
+                for (i in marker + 2 until chunk.size) {
+                    if ((chunk[i].toInt() and 0xFF) == 0xFD) {
+                        fd = i
+                        break
+                    }
+                }
+                if (fd >= 0) {
                     val rawScope = chunk.copyOfRange(marker, fd + 1)
-                    if (rawScope.size >= 493) {
+                    if (rawScope.size == 493) {
                         scopeRaw27Frames++
                         scopeCivFrames++
-                        scopeLastFrameTimeMs = System.currentTimeMillis()
-                        processSpectrumScopeFrame(rawScope.copyOfRange(2, rawScope.size - 1))
+                        processSpectrumScopeFrame(
+                            rawScope.copyOfRange(2, rawScope.size - 1)
+                        )
                         return
                     }
                 }
@@ -3207,84 +3279,6 @@ class MainActivity : Activity() {
     // 100 kHz radio waveform.
     // =================================================================
 
-    private var scopeLastFrameTimeMs: Long = 0L
-    private var scopeWatchdogThread: Thread? = null
-
-    private fun startSpectrumWatchdog() {
-        try {
-            scopeWatchdogThread?.interrupt()
-        } catch (_: Exception) {
-        }
-
-        scopeWatchdogThread = Thread {
-            try {
-                while (running && serialOpen && scopeStarted) {
-                    Thread.sleep(3000)
-
-                    if (!running || !serialOpen || !scopeStarted) {
-                        break
-                    }
-
-                    val now = System.currentTimeMillis()
-                    val lastFrame = scopeLastFrameTimeMs
-
-                    // If the IC-705 has stopped sending spectrum frames for
-                    // several seconds, re-send the complete proven spectrum
-                    // initialization sequence. This is the same sequence
-                    // used by the working external "SPECTRUM ON" program.
-                    if (lastFrame > 0L && now - lastFrame >= 5000L) {
-                        try {
-                            appendLog("SPECTRUM WATCHDOG: no frames for 5 seconds - re-enabling IC-705 scope")
-
-                            val commands = arrayOf(
-                                byteArrayOf(0x27.toByte(), 0x10.toByte(), 0x01.toByte()),
-                                byteArrayOf(0x27.toByte(), 0x11.toByte(), 0x01.toByte()),
-                                byteArrayOf(0x27.toByte(), 0x12.toByte(), 0x00.toByte()),
-                                byteArrayOf(0x27.toByte(), 0x13.toByte(), 0x00.toByte()),
-                                byteArrayOf(
-                                    0x27.toByte(),
-                                    0x14.toByte(),
-                                    0x00.toByte(),
-                                    0x00.toByte()
-                                ),
-                                buildScopeSpanCommand(100_000L)
-                            )
-
-                            for (cmd in commands) {
-                                if (!running || !serialOpen || !scopeStarted) {
-                                    break
-                                }
-                                sendScopeCommand(cmd)
-                                Thread.sleep(80)
-                            }
-
-                            scopeLastFrameTimeMs = System.currentTimeMillis()
-                        } catch (e: Exception) {
-                            if (running) {
-                                appendLog("SPECTRUM WATCHDOG ERROR: ${e.message}")
-                            }
-                        }
-                    }
-                }
-            } catch (_: InterruptedException) {
-            } catch (e: Exception) {
-                if (running) {
-                    appendLog("SPECTRUM WATCHDOG STOPPED: ${e.message}")
-                }
-            }
-        }
-
-        scopeWatchdogThread?.start()
-    }
-
-    private fun stopSpectrumWatchdog() {
-        try {
-            scopeWatchdogThread?.interrupt()
-        } catch (_: Exception) {
-        }
-        scopeWatchdogThread = null
-    }
-
     private fun startSpectrumScope() {
         if (!running || !serialOpen) {
             return
@@ -3295,7 +3289,6 @@ class MainActivity : Activity() {
         }
 
         stopScopePolling()
-        stopSpectrumWatchdog()
         resetScopeAssembly()
 
         scopeTransportPackets = 0L
@@ -3306,45 +3299,39 @@ class MainActivity : Activity() {
         scopeAwaitingResponse = false
         scopeLastUdpBytes = 0
         scopeLastCivBytes = 0
-        scopeLastFrameTimeMs = 0L
 
-        updateScopeInfo("Spectrum: enabling IC-705 scope output...")
-
-        try {
-            val commands = arrayOf(
-                byteArrayOf(0x27.toByte(), 0x10.toByte(), 0x01.toByte()),
-                byteArrayOf(0x27.toByte(), 0x11.toByte(), 0x01.toByte()),
-                byteArrayOf(0x27.toByte(), 0x12.toByte(), 0x00.toByte()),
-                byteArrayOf(0x27.toByte(), 0x13.toByte(), 0x00.toByte()),
-                byteArrayOf(
-                    0x27.toByte(),
-                    0x14.toByte(),
-                    0x00.toByte(),
-                    0x00.toByte()
-                ),
-                buildScopeSpanCommand(100_000L)
-            )
-
-            for (cmd in commands) {
-                sendScopeCommand(cmd)
-                Thread.sleep(80)
-            }
-
-            // The IC-705 streams raw 27 00 scope frames after initialization.
-        } catch (e: Exception) {
-            appendLog("SCOPE ENABLE SEND ERROR: ${e.message}")
-            updateScopeInfo("Spectrum: enable command failed")
-            return
-        }
-
+        // Mark the scope active before sending the enable commands.
+        // The IC-705 can begin transmitting the first 27 00 frame immediately
+        // after the first enable command, so the receive path must already
+        // consider the scope active.
         scopeStarted = true
-        scopeLastFrameTimeMs = System.currentTimeMillis()
-        startSpectrumWatchdog()
 
         runOnUiThread {
             scopeView.visibility = View.VISIBLE
             sensitivityRow.visibility = View.VISIBLE
             scopeToggleButton.text = "SPECTRUM OFF"
+        }
+
+        updateScopeInfo("Spectrum: enabling IC-705 scope output...")
+
+        try {
+            val commands = arrayOf(
+                byteArrayOf(0x27, 0x10, 0x01),
+                byteArrayOf(0x27, 0x11, 0x01),
+                byteArrayOf(0x27, 0x12, 0x00),
+                byteArrayOf(0x27, 0x13, 0x00),
+                byteArrayOf(0x27, 0x14, 0x00, 0x00),
+                buildScopeSpanCommand(100_000L)
+            )
+            for (cmd in commands) {
+                sendScopeCommand(cmd)
+                Thread.sleep(80)
+            }
+            // No repeated 27 00 polling. The radio is already streaming raw 27 00 frames.
+        } catch (e: Exception) {
+            appendLog("SCOPE ENABLE SEND ERROR: ${e.message}")
+            updateScopeInfo("Spectrum: enable command failed")
+            return
         }
 
         updateScopeInfo(
@@ -3410,7 +3397,6 @@ class MainActivity : Activity() {
     }
 
     private fun stopSpectrumScope() {
-        stopSpectrumWatchdog()
         stopScopePolling()
 
         try {
@@ -4007,8 +3993,7 @@ class MainActivity : Activity() {
             (civ[1].toInt() and 0xFF) == 0xFE &&
             (civ[2].toInt() and 0xFF) == 0xE0 &&
             (civ[3].toInt() and 0xFF) == 0xA4 &&
-            (civ[4].toInt() and 0xFF) == 0x15 &&
-            (civ[5].toInt() and 0xFF) == 0x02 &&
+            (civ[4].toInt() and 0xFF) == 0x15 &&            (civ[5].toInt() and 0xFF) == 0x02 &&
             (civ[civ.size - 1].toInt() and 0xFF) == 0xFD
         ) {
             val highBcd = civ[6].toInt() and 0xFF
@@ -5007,8 +4992,7 @@ class MainActivity : Activity() {
                     audioLocalSid
                 )
 
-                writeBeInt(
-                    audioDisconnect,
+                writeBeInt(                    audioDisconnect,
                     12,
                     audioRemoteSid
                 )
@@ -5149,6 +5133,7 @@ class MainActivity : Activity() {
             usbButton.isEnabled = false
             lsbButton.isEnabled = false
             enableBandButtons(false)
+            updateConnectionButtonColors(false)
         }
         appendLog("Connection closed.")
         appendLog("")
