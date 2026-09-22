@@ -773,7 +773,7 @@ class MainActivity : Activity() {
         addBandButtonRow(
             mainPane,
             listOf(
-                "17m\n18.100" to 18_100_000L,
+                "17m\n18.150" to 18_150_000L,
                 "15m\n21.300" to 21_300_000L,
                 "12m\n24.950" to 24_950_000L,
                 "10m\n28.400" to 28_400_000L
