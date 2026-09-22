@@ -3186,6 +3186,7 @@ class MainActivity : Activity() {
                     if (rawScope.size >= 493) {
                         scopeRaw27Frames++
                         scopeCivFrames++
+                        scopeLastFrameTimeMs = System.currentTimeMillis()
                         processSpectrumScopeFrame(rawScope.copyOfRange(2, rawScope.size - 1))
                         return
                     }
@@ -3206,6 +3207,84 @@ class MainActivity : Activity() {
     // 100 kHz radio waveform.
     // =================================================================
 
+    private var scopeLastFrameTimeMs: Long = 0L
+    private var scopeWatchdogThread: Thread? = null
+
+    private fun startSpectrumWatchdog() {
+        try {
+            scopeWatchdogThread?.interrupt()
+        } catch (_: Exception) {
+        }
+
+        scopeWatchdogThread = Thread {
+            try {
+                while (running && serialOpen && scopeStarted) {
+                    Thread.sleep(3000)
+
+                    if (!running || !serialOpen || !scopeStarted) {
+                        break
+                    }
+
+                    val now = System.currentTimeMillis()
+                    val lastFrame = scopeLastFrameTimeMs
+
+                    // If the IC-705 has stopped sending spectrum frames for
+                    // several seconds, re-send the complete proven spectrum
+                    // initialization sequence. This is the same sequence
+                    // used by the working external "SPECTRUM ON" program.
+                    if (lastFrame > 0L && now - lastFrame >= 5000L) {
+                        try {
+                            appendLog("SPECTRUM WATCHDOG: no frames for 5 seconds - re-enabling IC-705 scope")
+
+                            val commands = arrayOf(
+                                byteArrayOf(0x27.toByte(), 0x10.toByte(), 0x01.toByte()),
+                                byteArrayOf(0x27.toByte(), 0x11.toByte(), 0x01.toByte()),
+                                byteArrayOf(0x27.toByte(), 0x12.toByte(), 0x00.toByte()),
+                                byteArrayOf(0x27.toByte(), 0x13.toByte(), 0x00.toByte()),
+                                byteArrayOf(
+                                    0x27.toByte(),
+                                    0x14.toByte(),
+                                    0x00.toByte(),
+                                    0x00.toByte()
+                                ),
+                                buildScopeSpanCommand(100_000L)
+                            )
+
+                            for (cmd in commands) {
+                                if (!running || !serialOpen || !scopeStarted) {
+                                    break
+                                }
+                                sendScopeCommand(cmd)
+                                Thread.sleep(80)
+                            }
+
+                            scopeLastFrameTimeMs = System.currentTimeMillis()
+                        } catch (e: Exception) {
+                            if (running) {
+                                appendLog("SPECTRUM WATCHDOG ERROR: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            } catch (_: InterruptedException) {
+            } catch (e: Exception) {
+                if (running) {
+                    appendLog("SPECTRUM WATCHDOG STOPPED: ${e.message}")
+                }
+            }
+        }
+
+        scopeWatchdogThread?.start()
+    }
+
+    private fun stopSpectrumWatchdog() {
+        try {
+            scopeWatchdogThread?.interrupt()
+        } catch (_: Exception) {
+        }
+        scopeWatchdogThread = null
+    }
+
     private fun startSpectrumScope() {
         if (!running || !serialOpen) {
             return
@@ -3216,6 +3295,7 @@ class MainActivity : Activity() {
         }
 
         stopScopePolling()
+        stopSpectrumWatchdog()
         resetScopeAssembly()
 
         scopeTransportPackets = 0L
@@ -3226,23 +3306,31 @@ class MainActivity : Activity() {
         scopeAwaitingResponse = false
         scopeLastUdpBytes = 0
         scopeLastCivBytes = 0
+        scopeLastFrameTimeMs = 0L
 
         updateScopeInfo("Spectrum: enabling IC-705 scope output...")
 
         try {
             val commands = arrayOf(
-                byteArrayOf(0x27, 0x10, 0x01),
-                byteArrayOf(0x27, 0x11, 0x01),
-                byteArrayOf(0x27, 0x12, 0x00),
-                byteArrayOf(0x27, 0x13, 0x00),
-                byteArrayOf(0x27, 0x14, 0x00, 0x00),
+                byteArrayOf(0x27.toByte(), 0x10.toByte(), 0x01.toByte()),
+                byteArrayOf(0x27.toByte(), 0x11.toByte(), 0x01.toByte()),
+                byteArrayOf(0x27.toByte(), 0x12.toByte(), 0x00.toByte()),
+                byteArrayOf(0x27.toByte(), 0x13.toByte(), 0x00.toByte()),
+                byteArrayOf(
+                    0x27.toByte(),
+                    0x14.toByte(),
+                    0x00.toByte(),
+                    0x00.toByte()
+                ),
                 buildScopeSpanCommand(100_000L)
             )
+
             for (cmd in commands) {
                 sendScopeCommand(cmd)
                 Thread.sleep(80)
             }
-            // No repeated 27 00 polling. The radio is already streaming raw 27 00 frames.
+
+            // The IC-705 streams raw 27 00 scope frames after initialization.
         } catch (e: Exception) {
             appendLog("SCOPE ENABLE SEND ERROR: ${e.message}")
             updateScopeInfo("Spectrum: enable command failed")
@@ -3250,6 +3338,8 @@ class MainActivity : Activity() {
         }
 
         scopeStarted = true
+        scopeLastFrameTimeMs = System.currentTimeMillis()
+        startSpectrumWatchdog()
 
         runOnUiThread {
             scopeView.visibility = View.VISIBLE
@@ -3320,6 +3410,7 @@ class MainActivity : Activity() {
     }
 
     private fun stopSpectrumScope() {
+        stopSpectrumWatchdog()
         stopScopePolling()
 
         try {
