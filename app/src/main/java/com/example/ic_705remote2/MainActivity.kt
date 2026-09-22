@@ -20,6 +20,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import java.io.ByteArrayOutputStream
@@ -184,54 +185,80 @@ class MainActivity : Activity() {
     private var modeReceived = false
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "IC-705 Remote Control"
+        requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
         buildUserInterface()
     }
     private fun buildUserInterface() {
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setPadding(12, 12, 12, 12)
+        root.setPadding(8, 0, 8, 8)
+        root.setBackgroundColor(Color.rgb(18, 18, 18))
 
+        // Extra top space requested for the Samsung display.
+        // This moves the complete application UI down without changing
+        // the working controls or IC-705 protocol code.
+        val topSpacer = View(this)
+        // Compact title banner at the very top of the screen.
+        val titleBanner = TextView(this)
+        titleBanner.text = "IC-705 Remote Control"
+        titleBanner.textSize = 18f
+        titleBanner.setTextColor(Color.WHITE)
+        titleBanner.setBackgroundColor(Color.BLACK)
+        titleBanner.gravity = Gravity.CENTER
+        val titleBannerParams =
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(32)
+            )
+        titleBannerParams.topMargin = dp(36)
+        root.addView(titleBanner, titleBannerParams)
+
+        // Preserve the current working vertical position of the controls.
+        // The spacer is now BELOW the banner so the banner touches the top.
+        root.addView(
+            topSpacer,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(90)
+            )
+        )
+
+        // Fixed tab bar: it is outside the scrolling pages so it cannot
+        // disappear above the top of a small Samsung display.
         val tabRow = LinearLayout(this)
         tabRow.orientation = LinearLayout.HORIZONTAL
-        tabRow.gravity = Gravity.CENTER
+        tabRow.gravity = Gravity.CENTER_VERTICAL
+        tabRow.setBackgroundColor(Color.rgb(35, 35, 35))
 
         val mainTabButton = Button(this)
         mainTabButton.text = "MAIN"
+        mainTabButton.textSize = 16f
+        mainTabButton.minHeight = dp(56)
 
         val settingsTabButton = Button(this)
         settingsTabButton.text = "SETTINGS"
+        settingsTabButton.textSize = 16f
+        settingsTabButton.minHeight = dp(56)
 
         tabRow.addView(
             mainTabButton,
-            LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            )
+            android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
         )
         tabRow.addView(
             settingsTabButton,
-            LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            )
-        )
-        root.addView(
-            tabRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
         )
 
         mainPane = LinearLayout(this)
         mainPane.orientation = LinearLayout.VERTICAL
+        // Extra top space for Samsung displays so Spectrum controls/sliders
+        // are clearly visible below the phone's status area.
+        mainPane.setPadding(4, 4, 4, 16)
+        mainPane.setBackgroundColor(Color.rgb(18, 18, 18))
 
         settingsPane = LinearLayout(this)
         settingsPane.orientation = LinearLayout.VERTICAL
-        settingsPane.visibility = View.GONE
+        settingsPane.setPadding(4, 4, 4, 16)
 
         fun addLabel(
             parent: LinearLayout,
@@ -243,9 +270,9 @@ class MainActivity : Activity() {
             label.setPadding(0, 6, 0, 2)
             parent.addView(
                 label,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
+                android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             )
         }
@@ -265,9 +292,9 @@ class MainActivity : Activity() {
             }
             parent.addView(
                 edit,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
+                android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             )
             return edit
@@ -322,9 +349,9 @@ class MainActivity : Activity() {
         settingsNote.setPadding(0, 8, 0, 8)
         settingsPane.addView(
             settingsNote,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -332,9 +359,9 @@ class MainActivity : Activity() {
         saveSettingsButton.text = "SAVE SETTINGS"
         settingsPane.addView(
             saveSettingsButton,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -356,31 +383,71 @@ class MainActivity : Activity() {
 
         scopeControlRow.addView(
             scopeToggleButton,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
         mainPane.addView(
             scopeControlRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
         scopeView = SpectrumWaterfallView(this)
         scopeView.minimumHeight = dp(300)
+        // Keep the spectrum/waterfall at a real height.  The previous
+        // weight-based height could collapse it inside the ScrollView and
+        // make the controls below it appear to disappear.
         mainPane.addView(
             scopeView,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(300)
             )
         )
         scopeView.visibility = View.GONE
+
+        // Spectrum / waterfall display-size control.  This was accidentally
+        // omitted in the previous layout revision.
+        val scopeSizeRow = LinearLayout(this)
+        scopeSizeRow.orientation = LinearLayout.HORIZONTAL
+        scopeSizeRow.gravity = Gravity.CENTER_VERTICAL
+
+        val scopeSizeLabel = TextView(this)
+        scopeSizeLabel.text = "Spectrum / Waterfall Size: 25 px"
+        scopeSizeLabel.textSize = 14f
+        scopeSizeRow.addView(
+            scopeSizeLabel,
+            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+        )
+
+        val scopeSizeSeek = SeekBar(this)
+        scopeSizeSeek.min = 0
+        scopeSizeSeek.max = 600
+        scopeSizeSeek.progress = 25
+        scopeSizeSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val newHeight = progress.coerceIn(0, 600)
+                scopeSizeLabel.text = "Spectrum / Waterfall Size: ${newHeight} px"
+                scopeView.minimumHeight = dp(newHeight)
+                scopeView.layoutParams = scopeView.layoutParams.apply { this.height = dp(newHeight) }
+                scopeView.requestLayout()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        scopeSizeRow.addView(
+            scopeSizeSeek,
+            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
+        )
+        mainPane.addView(
+            scopeSizeRow,
+            android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
 
         sensitivityRow = LinearLayout(this)
         sensitivityRow.visibility = View.GONE
@@ -392,9 +459,9 @@ class MainActivity : Activity() {
         sensitivityLabel.textSize = 15f
         sensitivityRow.addView(
             sensitivityLabel,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
@@ -405,17 +472,17 @@ class MainActivity : Activity() {
         sensitivitySeekBar.progress = 100
         sensitivityRow.addView(
             sensitivitySeekBar,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 2.5f
             )
         )
         mainPane.addView(
             sensitivityRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -428,7 +495,7 @@ class MainActivity : Activity() {
         bandwidthLabel.textSize = 14f
         bandwidthRow.addView(
             bandwidthLabel,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
         )
 
         val bandwidthSeekBar = SeekBar(this)
@@ -454,11 +521,11 @@ class MainActivity : Activity() {
         })
         bandwidthRow.addView(
             bandwidthSeekBar,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
+            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
         )
         mainPane.addView(
             bandwidthRow,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
         )
 
         val noiseFloorRow = LinearLayout(this)
@@ -470,18 +537,21 @@ class MainActivity : Activity() {
         noiseFloorLabel.textSize = 14f
         noiseFloorRow.addView(
             noiseFloorLabel,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
         )
 
         val noiseFloorSeek = SeekBar(this)
         noiseFloorSeek.min = 0
-        noiseFloorSeek.max = 120
-        noiseFloorSeek.progress = 0
+        noiseFloorSeek.max = 100
+        noiseFloorSeek.progress = 50
         noiseFloorSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                noiseFloorLabel.text = "Noise floor: $progress"
+                val noiseFloor = progress - 50
+                noiseFloorLabel.text =
+                    if (noiseFloor > 0) "Noise floor: +$noiseFloor"
+                    else "Noise floor: $noiseFloor"
                 if (::scopeView.isInitialized) {
-                    scopeView.setNoiseFloor(progress)
+                    scopeView.setNoiseFloor(noiseFloor)
                 }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -489,11 +559,11 @@ class MainActivity : Activity() {
         })
         noiseFloorRow.addView(
             noiseFloorSeek,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
+            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
         )
         mainPane.addView(
             noiseFloorRow,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
         )
 
         // ----------------------------
@@ -508,9 +578,9 @@ class MainActivity : Activity() {
         signalMeterLabel.textSize = 16f
         signalMeterRow.addView(
             signalMeterLabel,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1.2f
             )
         )
@@ -525,7 +595,7 @@ class MainActivity : Activity() {
         signalMeterBar.progressTintList = ColorStateList.valueOf(Color.rgb(0, 190, 0))
         signalMeterRow.addView(
             signalMeterBar,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
                 28,
                 2.8f
@@ -534,9 +604,9 @@ class MainActivity : Activity() {
 
         mainPane.addView(
             signalMeterRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -546,9 +616,9 @@ class MainActivity : Activity() {
         frequencyLabel.textSize = 15f
         mainPane.addView(
             frequencyLabel,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -564,9 +634,9 @@ class MainActivity : Activity() {
                     InputType.TYPE_NUMBER_FLAG_DECIMAL
         frequencyRow.addView(
             frequencyEdit,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 2f
             )
         )
@@ -576,17 +646,17 @@ class MainActivity : Activity() {
         setFrequencyButton.isEnabled = false
         frequencyRow.addView(
             setFrequencyButton,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1.25f
             )
         )
         mainPane.addView(
             frequencyRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -612,41 +682,41 @@ class MainActivity : Activity() {
 
         tuningRow.addView(
             down500Button,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         tuningRow.addView(
             up500Button,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         tuningRow.addView(
             down1kButton,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         tuningRow.addView(
             up1kButton,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         mainPane.addView(
             tuningRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -664,25 +734,25 @@ class MainActivity : Activity() {
 
         modeRow.addView(
             usbButton,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         modeRow.addView(
             lsbButton,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         mainPane.addView(
             modeRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -723,40 +793,72 @@ class MainActivity : Activity() {
 
         connectionRow.addView(
             connectButton,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         connectionRow.addView(
             disconnectButton,
-            LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams(
                 0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
-        mainPane.addView(
-            connectionRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+        // Scrollable page areas. The MAIN / SETTINGS tab bar stays fixed.
+        val mainScroll = ScrollView(this)
+        mainScroll.isFillViewport = true
+        mainScroll.addView(
+            mainPane,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        val settingsScroll = ScrollView(this)
+        settingsScroll.isFillViewport = true
+        settingsScroll.visibility = View.GONE
+        settingsScroll.addView(
+            settingsPane,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
         root.addView(
-            mainPane,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
+            mainScroll,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        // Keep CONNECT / DISCONNECT and the MAIN / SETTINGS tabs together.
+        // They stay directly below the main scrolling content instead of
+        // being forced all the way to the bottom of the Samsung display.
+        root.addView(
+            connectionRow,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
         root.addView(
-            settingsPane,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
+            tabRow,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(56)
+            )
+        )
+
+        root.addView(
+            settingsScroll,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
                 1f
             )
@@ -765,13 +867,19 @@ class MainActivity : Activity() {
         setContentView(root)
 
         mainTabButton.setOnClickListener {
-            mainPane.visibility = View.VISIBLE
-            settingsPane.visibility = View.GONE
+            mainScroll.visibility = View.VISIBLE
+            settingsScroll.visibility = View.GONE
+            connectionRow.visibility = View.VISIBLE
+            mainTabButton.alpha = 1.0f
+            settingsTabButton.alpha = 0.65f
         }
 
         settingsTabButton.setOnClickListener {
-            mainPane.visibility = View.GONE
-            settingsPane.visibility = View.VISIBLE
+            mainScroll.visibility = View.GONE
+            settingsScroll.visibility = View.VISIBLE
+            connectionRow.visibility = View.GONE
+            mainTabButton.alpha = 0.65f
+            settingsTabButton.alpha = 1.0f
         }
 
         connectButton.setOnClickListener {
@@ -791,16 +899,32 @@ class MainActivity : Activity() {
             setFrequencyFromUi()
         }
         down500Button.setOnClickListener {
-            shiftFrequencyBy(-500L, "500 Hz")
+            if (running && serialOpen) {
+                shiftFrequencyBy(-500L, "500 Hz")
+            } else {
+                appendLog("ERROR: Connect to the IC-705 before tuning.")
+            }
         }
         up500Button.setOnClickListener {
-            shiftFrequencyBy(500L, "500 Hz")
+            if (running && serialOpen) {
+                shiftFrequencyBy(500L, "500 Hz")
+            } else {
+                appendLog("ERROR: Connect to the IC-705 before tuning.")
+            }
         }
         down1kButton.setOnClickListener {
-            shiftFrequencyBy(-1000L, "1 kHz")
+            if (running && serialOpen) {
+                shiftFrequencyBy(-1000L, "1 kHz")
+            } else {
+                appendLog("ERROR: Connect to the IC-705 before tuning.")
+            }
         }
         up1kButton.setOnClickListener {
-            shiftFrequencyBy(1000L, "1 kHz")
+            if (running && serialOpen) {
+                shiftFrequencyBy(1000L, "1 kHz")
+            } else {
+                appendLog("ERROR: Connect to the IC-705 before tuning.")
+            }
         }
         usbButton.setOnClickListener {
             setOperatingModeFromUi(
@@ -845,7 +969,34 @@ class MainActivity : Activity() {
         )
 
         scopeView.setSensitivity(1.0f)
+
+        // Dark theme text: keep all button, label, and settings text
+        // readable against the dark background.
+        applyDarkTextColors(root)
+
         mainTabButton.performClick()
+    }
+
+    private fun applyDarkTextColors(view: View) {
+        when (view) {
+            is Button -> {
+                view.setTextColor(Color.WHITE)
+                view.backgroundTintList = ColorStateList.valueOf(Color.BLACK)
+            }
+            is EditText -> {
+                view.setTextColor(Color.WHITE)
+                view.setHintTextColor(Color.LTGRAY)
+            }
+            is TextView -> {
+                view.setTextColor(Color.WHITE)
+            }
+        }
+
+        if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                applyDarkTextColors(view.getChildAt(i))
+            }
+        }
     }
 
     private fun addBandButtonRow(
@@ -861,15 +1012,23 @@ class MainActivity : Activity() {
             button.text = label
             button.isEnabled = false
             button.setOnClickListener {
+                frequencyHz = hz
                 frequencyEdit.setText(hz.toString())
+                if (::frequencyLabelView.isInitialized) {
+                    frequencyLabelView.text =
+                        "Frequency: ${formatFrequency(hz)}"
+                }
+                if (::scopeView.isInitialized) {
+                    scopeView.centerFrequencyHz = hz
+                }
                 setFrequencyFromUi()
             }
 
             row.addView(
                 button,
-                LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams(
                     0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                     1f
                 )
             )
@@ -877,9 +1036,9 @@ class MainActivity : Activity() {
 
         parent.addView(
             row,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -2644,14 +2803,10 @@ class MainActivity : Activity() {
     ) {
         runOnUiThread {
             val activeTint =
-                ColorStateList.valueOf(
-                    Color.rgb(0, 190, 0)
-                )
+                ColorStateList.valueOf(Color.BLACK)
 
             val inactiveTint =
-                ColorStateList.valueOf(
-                    Color.rgb(210, 210, 210)
-                )
+                ColorStateList.valueOf(Color.BLACK)
 
             when (modeCode) {
                 0x01 -> {
