@@ -251,7 +251,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.5"
+        titleBanner.text = "IC-705 Remote Control  •  v27.6"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -5355,7 +5355,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v27.5\n")
+        report.append("App version: v27.6\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
@@ -5409,24 +5409,17 @@ class MainActivity : Activity() {
                 try { audioTrack?.release() } catch (_: Exception) {}
                 audioTrack = null
 
-                try {
-                    val socket = audioSocket
-                    if (socket != null && !socket.isClosed &&
-                        audioLocalSid != 0 && audioRemoteSid != 0) {
-                        val disconnect = ByteArray(16)
-                        disconnect[0] = 0x10.toByte()
-                        disconnect[4] = 0x05
-                        writeBeInt(disconnect, 8, audioLocalSid)
-                        writeBeInt(disconnect, 12, audioRemoteSid)
-                        try { socket.send(DatagramPacket(disconnect, disconnect.size)) } catch (_: Exception) {}
-                        Thread.sleep(50)
-                        try { socket.send(DatagramPacket(disconnect, disconnect.size)) } catch (_: Exception) {}
-                        appendLog("AUDIO RECOVERY: disconnect sent twice")
-                    }
-                } catch (_: Exception) {}
-
+                // v27.6: do NOT send the audio-session disconnect packet here.
+                // v27.5 successfully completed the recovery handshake, but the
+                // repeated ~7-second audio drop pattern strongly suggests that
+                // explicitly disconnecting the radio-side stream during recovery
+                // may be contributing to the recurring loss. Close only our local
+                // UDP socket, then perform the normal PKT3/PKT4/PKT6 handshake.
                 try { audioSocket?.close() } catch (_: Exception) {}
                 audioSocket = null
+
+                appendLog("AUDIO RECOVERY: local UDP socket closed; no radio disconnect sent")
+                addNetworkEvent("AUDIO RECOVERY: local socket reset only")
 
                 Thread.sleep(250)
 
