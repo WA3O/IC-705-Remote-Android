@@ -1,6 +1,8 @@
 package com.example.ic_705remote2
 import android.app.Activity
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
@@ -55,6 +57,8 @@ class MainActivity : Activity() {
         private const val NETWORK_WATCHDOG_INTERVAL_MS = 1000L
         private const val NETWORK_WARN_AFTER_MS = 5000L
         private const val NETWORK_RESTART_AFTER_MS = 8000L
+        private const val NETWORK_HISTORY_MAX_SAMPLES = 300
+        private const val NETWORK_EVENT_MAX_ENTRIES = 200
 
         private const val PREFS_NAME = "ic705_remote_settings"
         private const val PREF_IP = "ic705_ip"
@@ -66,6 +70,7 @@ class MainActivity : Activity() {
     private lateinit var settingsPasswordEdit: EditText
     private lateinit var mainPane: LinearLayout
     private lateinit var settingsPane: LinearLayout
+    private lateinit var networkPane: LinearLayout
     private lateinit var connectButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var frequencyEdit: EditText
@@ -87,6 +92,8 @@ class MainActivity : Activity() {
     private lateinit var scopeView: SpectrumWaterfallView
     private lateinit var signalMeterLabel: TextView
     private lateinit var signalMeterBar: ProgressBar
+    private lateinit var networkQualitySummary: TextView
+    private lateinit var networkHistoryText: TextView
     private var controlSocket: DatagramSocket? = null
     private var serialSocket: DatagramSocket? = null
     private var audioSocket: DatagramSocket? = null
@@ -103,6 +110,11 @@ class MainActivity : Activity() {
     @Volatile private var lastSerialPacketAt = 0L
     @Volatile private var lastAudioPacketAt = 0L
     @Volatile private var networkWarningLogged = false
+
+    private data class NetworkQualitySample(val timestampMs: Long, val controlAgeMs: Long, val serialAgeMs: Long, val audioAgeMs: Long, val quality: Int, val status: String)
+    private val networkHistory = ArrayDeque<NetworkQualitySample>()
+    private val networkEvents = ArrayDeque<String>()
+    private val networkHistoryLock = Any()
     @Volatile
     private var running = false
     @Volatile
@@ -208,7 +220,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.1"
+        titleBanner.text = "IC-705 Remote Control  •  v27.2"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -249,12 +261,21 @@ class MainActivity : Activity() {
         settingsTabButton.textSize = 16f
         settingsTabButton.minHeight = dp(56)
 
+        val networkTabButton = Button(this)
+        networkTabButton.text = "NETWORK"
+        networkTabButton.textSize = 16f
+        networkTabButton.minHeight = dp(56)
+
         tabRow.addView(
             mainTabButton,
             android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
         )
         tabRow.addView(
             settingsTabButton,
+            android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
+        )
+        tabRow.addView(
+            networkTabButton,
             android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
         )
 
@@ -268,6 +289,10 @@ class MainActivity : Activity() {
         settingsPane = LinearLayout(this)
         settingsPane.orientation = LinearLayout.VERTICAL
         settingsPane.setPadding(4, 4, 4, 16)
+
+        networkPane = LinearLayout(this)
+        networkPane.orientation = LinearLayout.VERTICAL
+        networkPane.setPadding(4, 4, 4, 16)
 
         fun addLabel(
             parent: LinearLayout,
@@ -378,6 +403,43 @@ class MainActivity : Activity() {
             saveNetworkSettings()
             mainTabButton.performClick()
         }
+
+        // ----------------------------
+        // NETWORK QUALITY HISTORY TAB
+        // ----------------------------
+        val networkTitle = TextView(this)
+        networkTitle.text = "NETWORK QUALITY HISTORY"
+        networkTitle.textSize = 20f
+        networkPane.addView(networkTitle)
+
+        networkQualitySummary = TextView(this)
+        networkQualitySummary.text = "Quality: waiting for connection"
+        networkQualitySummary.textSize = 17f
+        networkPane.addView(networkQualitySummary)
+
+        networkHistoryText = TextView(this)
+        networkHistoryText.text = "No network samples yet."
+        networkHistoryText.textSize = 12f
+        networkHistoryText.typeface = Typeface.MONOSPACE
+        networkHistoryText.setTextIsSelectable(true)
+        val networkHistoryScroll = ScrollView(this)
+        networkHistoryScroll.addView(networkHistoryText)
+
+        val networkButtonRow = LinearLayout(this)
+        networkButtonRow.orientation = LinearLayout.HORIZONTAL
+
+        val copyNetworkButton = Button(this)
+        copyNetworkButton.text = "COPY REPORT"
+        copyNetworkButton.setOnClickListener { copyNetworkDiagnosticReport() }
+        networkButtonRow.addView(copyNetworkButton, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
+
+        val clearNetworkButton = Button(this)
+        clearNetworkButton.text = "CLEAR"
+        clearNetworkButton.setOnClickListener { clearNetworkHistory() }
+        networkButtonRow.addView(clearNetworkButton, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        networkPane.addView(networkButtonRow)
+        networkPane.addView(networkHistoryScroll, android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, dp(500)))
 
         // ----------------------------
         // MAIN TAB - SPECTRUM FIRST
@@ -827,6 +889,11 @@ class MainActivity : Activity() {
             )
         )
 
+        val networkScroll = ScrollView(this)
+        networkScroll.isFillViewport = true
+        networkScroll.visibility = View.GONE
+        networkScroll.addView(networkPane)
+
         val settingsScroll = ScrollView(this)
         settingsScroll.isFillViewport = true
         settingsScroll.visibility = View.GONE
@@ -872,23 +939,46 @@ class MainActivity : Activity() {
                 1f
             )
         )
+        root.addView(
+            networkScroll,
+            android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
 
         setContentView(root)
 
         mainTabButton.setOnClickListener {
             mainScroll.visibility = View.VISIBLE
             settingsScroll.visibility = View.GONE
+            networkScroll.visibility = View.GONE
             connectionRow.visibility = View.VISIBLE
             mainTabButton.alpha = 1.0f
             settingsTabButton.alpha = 0.65f
+            networkTabButton.alpha = 0.65f
         }
 
         settingsTabButton.setOnClickListener {
             mainScroll.visibility = View.GONE
             settingsScroll.visibility = View.VISIBLE
+            networkScroll.visibility = View.GONE
             connectionRow.visibility = View.GONE
             mainTabButton.alpha = 0.65f
             settingsTabButton.alpha = 1.0f
+            networkTabButton.alpha = 0.65f
+        }
+
+        networkTabButton.setOnClickListener {
+            mainScroll.visibility = View.GONE
+            settingsScroll.visibility = View.GONE
+            networkScroll.visibility = View.VISIBLE
+            connectionRow.visibility = View.GONE
+            mainTabButton.alpha = 0.65f
+            settingsTabButton.alpha = 0.65f
+            networkTabButton.alpha = 1.0f
+            refreshNetworkHistoryUi()
         }
 
         connectButton.setOnClickListener {
@@ -1143,6 +1233,7 @@ class MainActivity : Activity() {
         clearLog()
         running = true
         connected = false
+        clearNetworkHistory()
         authOk = false
         gotA8 = false
         connInfoOk = false
@@ -4948,6 +5039,8 @@ class MainActivity : Activity() {
                 val serialAge = nowMs - lastSerialPacketAt
                 val audioAge = nowMs - lastAudioPacketAt
 
+                recordNetworkQualitySample()
+
                 if (
                     controlAge >= NETWORK_WARN_AFTER_MS ||
                     (serialOpen && serialAge >= NETWORK_WARN_AFTER_MS) ||
@@ -4968,6 +5061,7 @@ class MainActivity : Activity() {
                     receiverThread?.isAlive != true
                 ) {
                     appendLog("NETWORK RECOVERY: restarting control receiver")
+                    addNetworkEvent("RECOVERY: control receiver")
                     startReceiverThread()
                 }
 
@@ -4977,6 +5071,7 @@ class MainActivity : Activity() {
                     serialReceiverThread?.isAlive != true
                 ) {
                     appendLog("NETWORK RECOVERY: restarting CI-V receiver")
+                    addNetworkEvent("RECOVERY: CI-V receiver")
                     startSerialReceiverThread()
                 }
 
@@ -4986,6 +5081,7 @@ class MainActivity : Activity() {
                     audioReceiverThread?.isAlive != true
                 ) {
                     appendLog("NETWORK RECOVERY: restarting audio receiver")
+                    addNetworkEvent("RECOVERY: audio receiver")
                     startAudioReceiverThread()
                 }
 
@@ -5001,6 +5097,129 @@ class MainActivity : Activity() {
             NETWORK_WATCHDOG_INTERVAL_MS,
             TimeUnit.MILLISECONDS
         )
+    }
+
+    private fun recordNetworkQualitySample() {
+        val now = System.currentTimeMillis()
+        val c = if (lastControlPacketAt > 0L) now - lastControlPacketAt else Long.MAX_VALUE
+        val s = if (lastSerialPacketAt > 0L) now - lastSerialPacketAt else Long.MAX_VALUE
+        val a = if (lastAudioPacketAt > 0L) now - lastAudioPacketAt else Long.MAX_VALUE
+        val cs = if (!connected) 0 else when {
+            c <= 1000L -> 100
+            c <= 3000L -> 80
+            c <= 5000L -> 60
+            c <= 8000L -> 30
+            else -> 0
+        }
+        val ss = if (!serialOpen) 100 else when {
+            s <= 1000L -> 100
+            s <= 3000L -> 80
+            s <= 5000L -> 60
+            s <= 8000L -> 30
+            else -> 0
+        }
+        val ascore = if (!audioRunning) 100 else when {
+            a <= 1000L -> 100
+            a <= 3000L -> 80
+            a <= 5000L -> 60
+            a <= 8000L -> 30
+            else -> 0
+        }
+        val q = ((cs + ss + ascore) / 3).coerceIn(0, 100)
+        val status = when {
+            !connected -> "DISCONNECTED"
+            q >= 90 -> "GOOD"
+            q >= 70 -> "FAIR"
+            q >= 40 -> "WARNING"
+            else -> "BAD"
+        }
+        synchronized(networkHistoryLock) {
+            if (networkHistory.size >= NETWORK_HISTORY_MAX_SAMPLES) networkHistory.removeFirst()
+            networkHistory.addLast(NetworkQualitySample(now, c, s, a, q, status))
+        }
+        if (::networkQualitySummary.isInitialized) {
+            runOnUiThread {
+                networkQualitySummary.text = "Quality: " + q + "% " + status + " | C=" + networkAge(c) + " S=" + networkAge(s) + " A=" + networkAge(a)
+                refreshNetworkHistoryUi()
+            }
+        }
+    }
+
+    private fun networkAge(v: Long): String = if (v == Long.MAX_VALUE) "--" else v.toString() + "ms"
+
+    private fun addNetworkEvent(message: String) {
+        val line = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()) + "  " + message
+        synchronized(networkHistoryLock) {
+            if (networkEvents.size >= NETWORK_EVENT_MAX_ENTRIES) networkEvents.removeFirst()
+            networkEvents.addLast(line)
+        }
+    }
+
+    private fun refreshNetworkHistoryUi() {
+        if (!::networkHistoryText.isInitialized) return
+        val samples = synchronized(networkHistoryLock) { networkHistory.toList() }
+        val events = synchronized(networkHistoryLock) { networkEvents.toList() }
+        val out = StringBuilder()
+        out.append("HISTORIC QUALITY BAR (newest at right)\n")
+        out.append("100 | ")
+        samples.takeLast(100).forEach { x ->
+            out.append(if (x.quality >= 90) "█" else if (x.quality >= 70) "▓" else if (x.quality >= 40) "▒" else "░")
+        }
+        out.append("\n  0 | ")
+        samples.takeLast(100).forEach { x ->
+            out.append(if (x.quality >= 50) " " else "█")
+        }
+        out.append("\n\nSAMPLES - newest last\n")
+        samples.takeLast(120).forEach { x ->
+            val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(x.timestampMs))
+            out.append(t).append(" Q=").append(x.quality).append("% ").append(x.status)
+                .append(" C=").append(networkAge(x.controlAgeMs))
+                .append(" S=").append(networkAge(x.serialAgeMs))
+                .append(" A=").append(networkAge(x.audioAgeMs)).append("\n")
+        }
+        if (events.isNotEmpty()) {
+            out.append("\nNETWORK EVENTS\n")
+            events.forEach { out.append(it).append("\n") }
+        }
+        networkHistoryText.text = out.toString()
+    }
+
+    private fun clearNetworkHistory() {
+        synchronized(networkHistoryLock) {
+            networkHistory.clear()
+            networkEvents.clear()
+        }
+        if (::networkQualitySummary.isInitialized) {
+            runOnUiThread {
+                networkQualitySummary.text = "Quality: waiting for connection"
+                networkHistoryText.text = "No network samples yet."
+            }
+        }
+    }
+
+    private fun copyNetworkDiagnosticReport() {
+        val samples = synchronized(networkHistoryLock) { networkHistory.toList() }
+        val events = synchronized(networkHistoryLock) { networkEvents.toList() }
+        val report = StringBuilder()
+        report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
+        report.append("App version: v27.2\n")
+        report.append("Generated: ")
+        report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
+        report.append("\nConnected=").append(connected).append(" Running=").append(running)
+            .append(" CI-V=").append(serialOpen).append(" Audio=").append(audioRunning).append("\n\n")
+        report.append("time,quality,status,controlAgeMs,serialAgeMs,audioAgeMs\n")
+        samples.forEach { x ->
+            report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(x.timestampMs)))
+                .append(",").append(x.quality).append(",").append(x.status)
+                .append(",").append(networkAge(x.controlAgeMs))
+                .append(",").append(networkAge(x.serialAgeMs))
+                .append(",").append(networkAge(x.audioAgeMs)).append("\n")
+        }
+        report.append("\nEVENTS\n")
+        events.forEach { report.append(it).append("\n") }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("IC-705 network diagnostic", report.toString()))
+        android.widget.Toast.makeText(this, "Diagnostic report copied. Paste it into ChatGPT.", android.widget.Toast.LENGTH_LONG).show()
     }
 
     private fun stopNetworkWatchdog() {
