@@ -2995,7 +2995,8 @@ class MainActivity : Activity() {
 
     private fun sendCivSetFrequency(hz: Long) {
         val civ = ByteArray(12)
-        civ[0] = 0xFE.toByte()        civ[1] = 0xFE.toByte()
+        civ[0] = 0xFE.toByte()
+        civ[1] = 0xFE.toByte()
         civ[2] = 0xA4.toByte()
         civ[3] = 0xE0.toByte()
         civ[4] = 0x25.toByte()
