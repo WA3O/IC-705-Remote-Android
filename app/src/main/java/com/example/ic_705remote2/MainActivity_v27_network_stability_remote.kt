@@ -126,7 +126,15 @@ class MainActivity : Activity() {
     @Volatile private var lastAudioRecoveryAt = 0L
     @Volatile private var lastScopeRecoveryAt = 0L
 
-    private data class NetworkQualitySample(val timestampMs: Long, val controlAgeMs: Long, val serialAgeMs: Long, val audioAgeMs: Long, val quality: Int, val status: String)
+    private data class NetworkQualitySample(
+        val timestampMs: Long,
+        val controlAgeMs: Long,
+        val serialAgeMs: Long,
+        val audioAgeMs: Long,
+        val scopeAgeMs: Long,
+        val quality: Int,
+        val status: String
+    )
     private val networkHistory = ArrayDeque<NetworkQualitySample>()
     private val networkEvents = ArrayDeque<String>()
     private val networkHistoryLock = Any()
@@ -5246,6 +5254,7 @@ class MainActivity : Activity() {
                     controlAge,
                     serialAge,
                     audioAge,
+                    scopeAge,
                     q.coerceIn(0, 100),
                     status
                 )
@@ -5295,7 +5304,8 @@ class MainActivity : Activity() {
             out.append(t).append(" Q=").append(x.quality).append("% ").append(x.status)
                 .append(" C=").append(networkAge(x.controlAgeMs))
                 .append(" S=").append(networkAge(x.serialAgeMs))
-                .append(" A=").append(networkAge(x.audioAgeMs)).append("\n")
+                .append(" A=").append(networkAge(x.audioAgeMs))
+                .append(" W=").append(networkAge(x.scopeAgeMs)).append("\n")
         }
         if (events.isNotEmpty()) {
             out.append("\nNETWORK EVENTS\n")
@@ -5327,13 +5337,14 @@ class MainActivity : Activity() {
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
             .append(" CI-V=").append(serialOpen).append(" Audio=").append(audioRunning).append("\n\n")
-        report.append("time,quality,status,controlAgeMs,serialAgeMs,audioAgeMs\n")
+        report.append("time,quality,status,controlAgeMs,serialAgeMs,audioAgeMs,scopeAgeMs\n")
         samples.forEach { x ->
             report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(x.timestampMs)))
                 .append(",").append(x.quality).append(",").append(x.status)
                 .append(",").append(networkAge(x.controlAgeMs))
                 .append(",").append(networkAge(x.serialAgeMs))
-                .append(",").append(networkAge(x.audioAgeMs)).append("\n")
+                .append(",").append(networkAge(x.audioAgeMs))
+                .append(",").append(networkAge(x.scopeAgeMs)).append("\n")
         }
         report.append("\nEVENTS\n")
         events.forEach { report.append(it).append("\n") }
