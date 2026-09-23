@@ -119,7 +119,12 @@ class MainActivity : Activity() {
     @Volatile private var lastControlPacketAt = 0L
     @Volatile private var lastSerialPacketAt = 0L
     @Volatile private var lastAudioPacketAt = 0L
+    @Volatile private var lastAudioRxAt = 0L
     @Volatile private var lastAudioPcmAt = 0L
+    @Volatile private var audioRxPacketCount = 0L
+    @Volatile private var audioPcmPacketCount = 0L
+    @Volatile private var audioPkt7RxCount = 0L
+    @Volatile private var audioLocalPort = 0
     @Volatile private var lastScopeFrameAt = 0L
     @Volatile private var networkWarningLogged = false
 
@@ -251,7 +256,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.6"
+        titleBanner.text = "IC-705 Remote Control  •  v27.7"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -2056,10 +2061,12 @@ class MainActivity : Activity() {
 
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
+        // v27.7: use an ephemeral local UDP source port for audio.
+        // The IC-705 audio server remains on remote port 50003.
         socket.bind(
             InetSocketAddress(
                 "0.0.0.0",
-                AUDIO_PORT
+                0
             )
         )
         socket.connect(
@@ -2071,6 +2078,11 @@ class MainActivity : Activity() {
         socket.soTimeout = SOCKET_TIMEOUT_MS
 
         audioSocket = socket
+        audioLocalPort = socket.localPort
+        lastAudioRxAt = 0L
+        audioRxPacketCount = 0L
+        audioPcmPacketCount = 0L
+        audioPkt7RxCount = 0L
 
         appendLog(
             "Audio socket local port: ${socket.localPort}"
@@ -2096,7 +2108,7 @@ class MainActivity : Activity() {
 
         audioLocalSid =
             (audioLocalSid shl 16) or
-                    (AUDIO_PORT and 0xFFFF)
+                    (socket.localPort and 0xFFFF)
 
         appendLog(
             "Audio local IPv4: " +
@@ -2110,7 +2122,7 @@ class MainActivity : Activity() {
         appendLog("================================")
         appendLog("IC-705 RECEIVE AUDIO")
         appendLog("================================")
-        appendLog("Audio UDP local port: $AUDIO_PORT")
+        appendLog("Audio UDP local port: ${socket.localPort}")
         appendLog(
             "Audio local SID: ${intToHex(audioLocalSid)}"
         )
@@ -2374,12 +2386,17 @@ class MainActivity : Activity() {
     private fun processAudioPacket(
         data: ByteArray
     ) {
+        lastAudioRxAt = System.currentTimeMillis()
+        audioRxPacketCount++
+
         // Radio ping packets are handled here too.
         if (
             data.size == 21 &&
             (data[4].toInt() and 0xFF) == 0x07 &&
             (data[5].toInt() and 0xFF) == 0x00
         ) {
+            audioPkt7RxCount++
+
             val direction =
                 data[16].toInt() and 0xFF
 
@@ -2484,6 +2501,7 @@ class MainActivity : Activity() {
         // Count only real PCM audio as healthy audio. PKT7 keepalives
         // do not reset the audio-quality timer.
         lastAudioPcmAt = System.currentTimeMillis()
+        audioPcmPacketCount++
                 if (audioRecoveryWaitingForPcm) {
                     audioRecoveryWaitingForPcm = false
                     audioRecoveryAttempt = 0
@@ -5355,7 +5373,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v27.6\n")
+        report.append("App version: v27.7\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
@@ -5365,6 +5383,12 @@ class MainActivity : Activity() {
             .append("\n")
             .append("AudioPCM=").append(networkAge(if (lastAudioPcmAt > 0L) System.currentTimeMillis() - lastAudioPcmAt else Long.MAX_VALUE))
             .append(" ScopeFrame=").append(networkAge(if (lastScopeFrameAt > 0L) System.currentTimeMillis() - lastScopeFrameAt else Long.MAX_VALUE))
+            .append("\n")
+            .append("AudioLocalPort=").append(audioLocalPort)
+            .append(" AudioRXPackets=").append(audioRxPacketCount)
+            .append(" AudioPCMPackets=").append(audioPcmPacketCount)
+            .append(" AudioPKT7RX=").append(audioPkt7RxCount)
+            .append(" AudioLastRX=").append(networkAge(if (lastAudioRxAt > 0L) System.currentTimeMillis() - lastAudioRxAt else Long.MAX_VALUE))
             .append("\n\n")
         report.append("time,quality,status,controlAgeMs,serialAgeMs,audioAgeMs,scopeAgeMs\n")
         samples.forEach { x ->
@@ -5419,6 +5443,11 @@ class MainActivity : Activity() {
                 audioSocket = null
 
                 appendLog("AUDIO RECOVERY: local UDP socket closed; no radio disconnect sent")
+                appendLog(
+                    "AUDIO RECOVERY DIAG: RX=" + audioRxPacketCount +
+                            " PCM=" + audioPcmPacketCount +
+                            " PKT7=" + audioPkt7RxCount
+                )
                 addNetworkEvent("AUDIO RECOVERY: local socket reset only")
 
                 Thread.sleep(250)
@@ -5433,6 +5462,11 @@ class MainActivity : Activity() {
                 )
 
                 openAudioReceive(radioIp)
+
+                appendLog(
+                    "AUDIO RECOVERY DIAG: new local port=" + audioLocalPort +
+                            " localSID=" + intToHex(audioLocalSid)
+                )
 
                 lastAudioPcmAt = 0L
                 audioRecoveryWaitingForPcm = true
@@ -5754,6 +5788,11 @@ class MainActivity : Activity() {
         audioRecoveryAttempt = 0
         scopeRecoveryAttempt = 0
         lastAudioPcmAt = 0L
+        lastAudioRxAt = 0L
+        audioRxPacketCount = 0L
+        audioPcmPacketCount = 0L
+        audioPkt7RxCount = 0L
+        audioLocalPort = 0
         lastScopeFrameAt = 0L
         cleanupSocketOnly()
         runOnUiThread {
