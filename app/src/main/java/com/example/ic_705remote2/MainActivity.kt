@@ -68,9 +68,11 @@ class MainActivity : Activity() {
         private const val NETWORK_GOOD_AGE_MS = 1000L
         private const val NETWORK_COMMON_STALL_AFTER_MS = 1500L
         private const val NETWORK_COMMON_STALL_COOLDOWN_MS = 6000L
-        // v28.3: only rebuild the complete session when BOTH control and CI-V have been silent for a sustained period.
+        // v28.4: only rebuild the complete session when BOTH control and CI-V have been silent for a sustained period.
         private const val FULL_SESSION_RECOVERY_AFTER_MS = 8000L
         private const val FULL_SESSION_RECOVERY_COOLDOWN_MS = 15000L
+        private const val MEDIA_RECOVERY_MAX_ATTEMPTS = 3
+        private const val MEDIA_RECOVERY_PAUSE_MS = 30000L
 
         private const val PREFS_NAME = "ic705_remote_settings"
         private const val PREF_IP = "ic705_ip"
@@ -140,6 +142,8 @@ class MainActivity : Activity() {
     @Volatile private var lastScopeRecoveryAt = 0L
     @Volatile private var audioRecoveryWaitUntilAt = 0L
     @Volatile private var scopeRecoveryWaitUntilAt = 0L
+    @Volatile private var audioRecoveryPausedUntilAt = 0L
+    @Volatile private var scopeRecoveryPausedUntilAt = 0L
     @Volatile private var audioRecoveryAttempt = 0
     @Volatile private var scopeRecoveryAttempt = 0
     @Volatile private var lastCommonStallAt = 0L
@@ -263,7 +267,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v28.3"
+        titleBanner.text = "IC-705 Remote Control  •  v28.4"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -1586,7 +1590,9 @@ class MainActivity : Activity() {
         // Audio is independent UDP 50003 and is started once after the
         // initial frequency read. Repeated band changes reuse this stream.
         audioExpected = true
-        lastAudioPcmAt = 0L
+        lastAudioPcmAt = System.currentTimeMillis()
+        audioRecoveryAttempt = 0
+        audioRecoveryPausedUntilAt = 0L
         try {
             openAudioReceive(radioIp)
         } catch (e: Exception) {
@@ -2578,6 +2584,7 @@ class MainActivity : Activity() {
                     audioRecoveryWaitingForPcm = false
                     audioRecoveryWaitUntilAt = 0L
                     audioRecoveryAttempt = 0
+                    audioRecoveryPausedUntilAt = 0L
                     appendLog("AUDIO RECOVERY: PCM RESTORED")
                     addNetworkEvent("AUDIO RECOVERY: PCM RESTORED")
                 }
@@ -5233,6 +5240,7 @@ class MainActivity : Activity() {
                     audioExpected &&
                     audioPcmAge >= AUDIO_RECOVERY_AFTER_MS &&
                     nowMs - lastAudioRecoveryAt >= AUDIO_RECOVERY_COOLDOWN_MS &&
+                    nowMs >= audioRecoveryPausedUntilAt &&
                     !audioRecoveryInProgress &&
                     (!audioRecoveryWaitingForPcm || nowMs >= audioRecoveryWaitUntilAt)
                 ) {
@@ -5250,6 +5258,7 @@ class MainActivity : Activity() {
                     scopeStarted &&
                     scopeAge >= SCOPE_RECOVERY_AFTER_MS &&
                     nowMs - lastScopeRecoveryAt >= SCOPE_RECOVERY_COOLDOWN_MS &&
+                    nowMs >= scopeRecoveryPausedUntilAt &&
                     !scopeRecoveryInProgress &&
                     (!scopeRecoveryWaitingForFrame || nowMs >= scopeRecoveryWaitUntilAt)
                 ) {
@@ -5285,7 +5294,7 @@ class MainActivity : Activity() {
                     }
                 }
 
-                // v28.3: audio-only failures do not rebuild the complete session.
+                // v28.4: audio-only failures do not rebuild the complete session.
                 // A full reconnect is allowed only when BOTH control and CI-V have
                 // stopped receiving for the sustained threshold.
                 if (
@@ -5342,7 +5351,7 @@ class MainActivity : Activity() {
         )
     }
 
-    // v28.3: full-session recovery is deliberately separate from the audio and
+    // v28.4: full-session recovery is deliberately separate from the audio and
     // spectrum recovery paths. It is reached only after both control and CI-V
     // have been silent for the sustained watchdog threshold.
     private fun recoverFullSession() {
@@ -5582,7 +5591,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v28.3\n")
+        report.append("App version: v28.4\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
@@ -5617,6 +5626,16 @@ class MainActivity : Activity() {
 
     private fun recoverAudioStream() {
         if (!running || !audioExpected || audioRecoveryInProgress) {
+            return
+        }
+        if (System.currentTimeMillis() < audioRecoveryPausedUntilAt) {
+            return
+        }
+        if (audioRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS) {
+            audioRecoveryPausedUntilAt = System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
+            audioRecoveryWaitingForPcm = false
+            appendLog("AUDIO RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS failed attempts; waiting 30 seconds")
+            addNetworkEvent("AUDIO RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS attempts")
             return
         }
 
@@ -5692,6 +5711,14 @@ class MainActivity : Activity() {
                 }
             } finally {
                 audioRecoveryInProgress = false
+                if (audioRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS &&
+                    audioPcmPacketCount == 0L) {
+                    audioRecoveryPausedUntilAt =
+                        System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
+                    audioRecoveryWaitingForPcm = false
+                    appendLog("AUDIO RECOVERY: 3 attempts completed; pausing local recovery for 30 seconds")
+                    addNetworkEvent("AUDIO RECOVERY: paused for 30 seconds")
+                }
             }
         }.apply {
             name = "IC705-Audio-Recovery"
@@ -5702,6 +5729,16 @@ class MainActivity : Activity() {
 
     private fun recoverSpectrumStream() {
         if (!running || !serialOpen || !scopeStarted || scopeRecoveryInProgress) {
+            return
+        }
+        if (System.currentTimeMillis() < scopeRecoveryPausedUntilAt) {
+            return
+        }
+        if (scopeRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS) {
+            scopeRecoveryPausedUntilAt = System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
+            scopeRecoveryWaitingForFrame = false
+            appendLog("SCOPE RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS failed attempts; waiting 30 seconds")
+            addNetworkEvent("SCOPE RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS attempts")
             return
         }
 
@@ -5726,6 +5763,8 @@ class MainActivity : Activity() {
                 }
 
                 scopeStarted = false
+                scopeRecoveryAttempt = 0
+                scopeRecoveryPausedUntilAt = 0L
                 resetScopeAssembly()
 
                 Thread.sleep(250)
@@ -5748,6 +5787,14 @@ class MainActivity : Activity() {
                 }
             } finally {
                 scopeRecoveryInProgress = false
+                if (scopeRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS &&
+                    scopeRaw27Frames == 0L) {
+                    scopeRecoveryPausedUntilAt =
+                        System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
+                    scopeRecoveryWaitingForFrame = false
+                    appendLog("SCOPE RECOVERY: 3 attempts completed; pausing local recovery for 30 seconds")
+                    addNetworkEvent("SCOPE RECOVERY: paused for 30 seconds")
+                }
             }
         }.apply {
             name = "IC705-Scope-Recovery"
