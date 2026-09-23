@@ -256,7 +256,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.7"
+        titleBanner.text = "IC-705 Remote Control  •  v27.8"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -520,6 +520,9 @@ class MainActivity : Activity() {
         )
 
         scopeView = SpectrumWaterfallView(this)
+        scopeView.onFrequencyTouch = { targetHz ->
+            setFrequencyFromSpectrum(targetHz)
+        }
         scopeView.minimumHeight = dp(300)
         // Keep the spectrum/waterfall at a real height.  The previous
         // weight-based height could collapse it inside the ScrollView and
@@ -1933,6 +1936,66 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 if (running) {
                     appendLog("$stepLabel TUNE ERROR: ${e.message}")
+                }
+            } finally {
+                if (running) {
+                    runOnUiThread {
+                        setFrequencyButton.isEnabled = true
+                        down500Button.isEnabled = true
+                        up500Button.isEnabled = true
+                        down1kButton.isEnabled = true
+                        up1kButton.isEnabled = true
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun setFrequencyFromSpectrum(targetHz: Long) {
+        if (!running || !serialOpen) {
+            appendLog("SPECTRUM TUNE: CI-V serial stream is not open.")
+            return
+        }
+
+        val roundedHz = ((targetHz + 500L) / 1000L) * 1000L
+        if (roundedHz < 1_000L || roundedHz > 9_999_999_999L) {
+            appendLog("SPECTRUM TUNE: frequency outside supported range.")
+            return
+        }
+
+        val previousHz = frequencyHz
+        frequencyHz = roundedHz
+
+        runOnUiThread {
+            frequencyEdit.setText(roundedHz.toString())
+            frequencyLabelView.text = "Frequency: ${formatFrequency(roundedHz)}"
+            if (::scopeView.isInitialized) {
+                scopeView.centerFrequencyHz = roundedHz
+            }
+            setFrequencyButton.isEnabled = false
+            down500Button.isEnabled = false
+            up500Button.isEnabled = false
+            down1kButton.isEnabled = false
+            up1kButton.isEnabled = false
+        }
+
+        appendLog(
+            "SPECTRUM TOUCH TUNE: ${formatFrequency(previousHz)} -> " +
+                    "${formatFrequency(roundedHz)}"
+        )
+
+        Thread {
+            try {
+                frequencyWriteResponseReceived = false
+                frequencyWriteRejected = false
+                sendCivSetFrequency(roundedHz)
+                appendLog(
+                    "SPECTRUM TOUCH TUNE SENT: ${formatFrequency(roundedHz)}"
+                )
+                Thread.sleep(100)
+            } catch (e: Exception) {
+                if (running) {
+                    appendLog("SPECTRUM TOUCH TUNE ERROR: ${e.message}")
                 }
             } finally {
                 if (running) {
@@ -5373,7 +5436,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v27.7\n")
+        report.append("App version: v27.8\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
@@ -6101,12 +6164,64 @@ class MainActivity : Activity() {
         @Volatile private var displayBandwidthKHz = 75
         @Volatile var centerFrequencyHz = 0L
         @Volatile private var totalSpanFrequencyHz = 100_000L
+        var onFrequencyTouch: ((Long) -> Unit)? = null
+        private var touchDownX = 0f
+        private var touchDownY = 0f
+        private var touchDownAt = 0L
         init { setBackgroundColor(Color.rgb(4,8,10)) }
         fun clearScope() { synchronized(this) { spectrum=IntArray(356); waterfall.clear(); centerFrequencyHz=0L; totalSpanFrequencyHz=100_000L }; postInvalidate() }
         fun setSensitivity(gain: Float) { sensitivity=gain.coerceIn(0.25f,4f); postInvalidate() }
         fun setNoiseFloor(v:Int) { noiseFloor=v.coerceIn(0,120); postInvalidate() }
         fun setDisplayBandwidthKHz(v:Int) { displayBandwidthKHz=v.coerceIn(5,1000); postInvalidate() }
         fun updateSpectrum(centerHz:Long,totalSpanHz:Long,samples:IntArray) { centerFrequencyHz=centerHz; totalSpanFrequencyHz=if(totalSpanHz>0) totalSpanHz else 100_000L; synchronized(this){ spectrum=samples.copyOf(); if(waterfall.size>=WATERFALL_ROWS) waterfall.removeLast(); waterfall.addFirst(samples.copyOf()) }; postInvalidate() }
+        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    touchDownX = event.x
+                    touchDownY = event.y
+                    touchDownAt = System.currentTimeMillis()
+                    return true
+                }
+
+                android.view.MotionEvent.ACTION_UP -> {
+                    val dx = event.x - touchDownX
+                    val dy = event.y - touchDownY
+                    val elapsed = System.currentTimeMillis() - touchDownAt
+
+                    if (elapsed <= 700L &&
+                        kotlin.math.abs(dx) <= 40f &&
+                        kotlin.math.abs(dy) <= 40f &&
+                        width > 1 &&
+                        centerFrequencyHz > 0L &&
+                        totalSpanFrequencyHz > 0L
+                    ) {
+                        val fraction = (event.x / width.toFloat()).coerceIn(0f, 1f)
+                        val targetHz =
+                            centerFrequencyHz -
+                                    totalSpanFrequencyHz / 2L +
+                                    (fraction * totalSpanFrequencyHz.toDouble()).toLong()
+
+                        // Always resolve a touch to the nearest 1 kHz.
+                        val roundedHz = ((targetHz + 500L) / 1000L) * 1000L
+                        onFrequencyTouch?.invoke(roundedHz)
+                    }
+
+                    performClick()
+                    return true
+                }
+
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    return true
+                }
+            }
+            return true
+        }
+
+        override fun performClick(): Boolean {
+            super.performClick()
+            return true
+        }
+
         override fun onDraw(canvas:Canvas){
             super.onDraw(canvas); val w=width.toFloat(); val h=height.toFloat(); if(w<=0f||h<=0f)return
             canvas.drawColor(Color.rgb(4,8,10)); val spectrumHeight=maxOf(140f,h*0.45f)
