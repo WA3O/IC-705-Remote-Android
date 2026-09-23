@@ -6097,3 +6097,85 @@ class MainActivity : Activity() {
             canvas.drawLine(0f,spectrumHeight,w,spectrumHeight,gridPaint)
             val rows=synchronized(this){waterfall.toList()}; val rowHeight=maxOf(1f,(h-spectrumHeight-2f)/WATERFALL_ROWS.toFloat())
             for(r in rows.indices) drawWaterfallRow(canvas,rows[r],spectrumHeight+r*rowHeight,w,rowHeight)
+        }
+
+        private fun drawWaterfallRow(
+            canvas: Canvas,
+            row: IntArray,
+            y: Float,
+            width: Float,
+            rowHeight: Float
+        ) {
+            if (row.isEmpty()) return
+            val denom = maxOf(1, 160 - noiseFloor)
+            for (i in row.indices) {
+                val adjusted = maxOf(0, row[i] - noiseFloor)
+                val level = ((adjusted.toFloat() / denom) * sensitivity)
+                    .coerceIn(0f, 1f)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.rgb(
+                        (8 + 247 * level).toInt().coerceIn(0, 255),
+                        (12 + 180 * level * level).toInt().coerceIn(0, 255),
+                        (25 + 225 * level).toInt().coerceIn(0, 255)
+                    )
+                }
+                val x0 = i.toFloat() / row.size.toFloat() * width
+                val x1 = (i + 1).toFloat() / row.size.toFloat() * width
+                canvas.drawRect(
+                    x0,
+                    y,
+                    x1 + 1f,
+                    y + rowHeight + 1f,
+                    paint
+                )
+            }
+        }
+
+        private fun drawFrequencyLabels(
+            canvas: Canvas,
+            width: Float,
+            spectrumHeight: Float
+        ) {
+            val center = centerFrequencyHz
+            if (center <= 0L) return
+
+            val visibleHz = minOf(
+                displayBandwidthKHz.toLong() * 1000L,
+                totalSpanFrequencyHz
+            )
+
+            val left = formatMHz(center - visibleHz / 2L)
+            val mid = formatMHz(center)
+            val right = formatMHz(center + visibleHz / 2L)
+
+            canvas.drawText(
+                left,
+                6f,
+                spectrumHeight - 4f,
+                textPaint
+            )
+
+            val midWidth = textPaint.measureText(mid)
+            canvas.drawText(
+                mid,
+                width / 2f - midWidth / 2f,
+                spectrumHeight - 4f,
+                textPaint
+            )
+
+            val rightWidth = textPaint.measureText(right)
+            canvas.drawText(
+                right,
+                width - rightWidth - 6f,
+                spectrumHeight - 4f,
+                textPaint
+            )
+        }
+
+        private fun formatMHz(hz: Long): String {
+            return String.format(
+                java.util.Locale.US,
+                "%.6f",
+                hz / 1_000_000.0
+            )
+        }
