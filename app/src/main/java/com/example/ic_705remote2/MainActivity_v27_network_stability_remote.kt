@@ -256,7 +256,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.8"
+        titleBanner.text = "IC-705 Remote Control  •  v27.9"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -2124,12 +2124,13 @@ class MainActivity : Activity() {
 
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
-        // v27.7: use an ephemeral local UDP source port for audio.
-        // The IC-705 audio server remains on remote port 50003.
+        // v27.9: restore the IC-705 audio UDP source port to 50003.
+        // v27.7 used an ephemeral source port; the radio continued sending
+        // PKT7 keepalives but no PCM audio. Keep the known-good fixed port.
         socket.bind(
             InetSocketAddress(
                 "0.0.0.0",
-                0
+                AUDIO_PORT
             )
         )
         socket.connect(
@@ -2169,9 +2170,10 @@ class MainActivity : Activity() {
                     ((localAddressBytes[2].toInt() and 0xFF) shl 8) or
                     (localAddressBytes[3].toInt() and 0xFF)
 
+        // Keep the SID tied to the fixed audio port.
         audioLocalSid =
             (audioLocalSid shl 16) or
-                    (socket.localPort and 0xFFFF)
+                    (AUDIO_PORT and 0xFFFF)
 
         appendLog(
             "Audio local IPv4: " +
@@ -5436,7 +5438,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v27.8\n")
+        report.append("App version: v27.9\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
