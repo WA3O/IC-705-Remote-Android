@@ -6179,3 +6179,5 @@ class MainActivity : Activity() {
                 hz / 1_000_000.0
             )
         }
+    }
+}
