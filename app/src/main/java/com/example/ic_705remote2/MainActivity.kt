@@ -263,7 +263,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v28.2"
+        titleBanner.text = "IC-705 Remote Control  •  v28.3"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -5285,7 +5285,7 @@ class MainActivity : Activity() {
                     }
                 }
 
-                // v28.2: audio-only failures do not rebuild the complete session.
+                // v28.3: audio-only failures do not rebuild the complete session.
                 // A full reconnect is allowed only when BOTH control and CI-V have
                 // stopped receiving for the sustained threshold.
                 if (
@@ -5342,7 +5342,7 @@ class MainActivity : Activity() {
         )
     }
 
-    // v28.2: full-session recovery is deliberately separate from the audio and
+    // v28.3: full-session recovery is deliberately separate from the audio and
     // spectrum recovery paths. It is reached only after both control and CI-V
     // have been silent for the sustained watchdog threshold.
     private fun recoverFullSession() {
@@ -5582,7 +5582,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v28.2\n")
+        report.append("App version: v28.3\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
