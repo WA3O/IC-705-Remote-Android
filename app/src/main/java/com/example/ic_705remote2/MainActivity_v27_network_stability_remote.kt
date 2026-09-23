@@ -65,6 +65,9 @@ class MainActivity : Activity() {
         private const val AUDIO_RECOVERY_COOLDOWN_MS = 6000L
         private const val SCOPE_RECOVERY_AFTER_MS = 3500L
         private const val SCOPE_RECOVERY_COOLDOWN_MS = 7000L
+        private const val NETWORK_GOOD_AGE_MS = 1000L
+        private const val NETWORK_COMMON_STALL_AFTER_MS = 1500L
+        private const val NETWORK_COMMON_STALL_COOLDOWN_MS = 6000L
 
         private const val PREFS_NAME = "ic705_remote_settings"
         private const val PREF_IP = "ic705_ip"
@@ -125,6 +128,7 @@ class MainActivity : Activity() {
     @Volatile private var scopeRecoveryInProgress = false
     @Volatile private var lastAudioRecoveryAt = 0L
     @Volatile private var lastScopeRecoveryAt = 0L
+    @Volatile private var lastCommonStallAt = 0L
 
     private data class NetworkQualitySample(
         val timestampMs: Long,
@@ -243,7 +247,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.3"
+        titleBanner.text = "IC-705 Remote Control  •  v27.4"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -5072,6 +5076,7 @@ class MainActivity : Activity() {
         lastControlPacketAt = now
         lastSerialPacketAt = now
         lastAudioPacketAt = now
+        lastCommonStallAt = 0L
         networkWarningLogged = false
 
         networkWatchdogScheduler =
@@ -5092,6 +5097,30 @@ class MainActivity : Activity() {
                     else Long.MAX_VALUE
 
                 recordNetworkQualitySample()
+
+                val commonAges = mutableListOf<Long>()
+                if (connected) commonAges.add(controlAge)
+                if (serialOpen) commonAges.add(serialAge)
+                if (audioExpected) commonAges.add(audioPcmAge)
+                if (scopeStarted) commonAges.add(scopeAge)
+
+                if (
+                    commonAges.size >= 2 &&
+                    commonAges.all { it >= NETWORK_COMMON_STALL_AFTER_MS } &&
+                    nowMs - lastCommonStallAt >= NETWORK_COMMON_STALL_COOLDOWN_MS
+                ) {
+                    lastCommonStallAt = nowMs
+                    appendLog(
+                        "NETWORK STALL: multiple UDP streams paused " +
+                                "for ${commonAges.maxOrNull() ?: 0}ms"
+                    )
+                    addNetworkEvent(
+                        "COMMON UDP STALL: C=${networkAge(controlAge)} " +
+                                "S=${networkAge(serialAge)} " +
+                                "AUDIO=${networkAge(audioPcmAge)} " +
+                                "SCOPE=${networkAge(scopeAge)}"
+                    )
+                }
 
                 if (
                     audioExpected &&
@@ -5184,21 +5213,10 @@ class MainActivity : Activity() {
     private fun recordNetworkQualitySample() {
         val now = System.currentTimeMillis()
 
-        val controlAge =
-            if (lastControlPacketAt > 0L) now - lastControlPacketAt
-            else Long.MAX_VALUE
-
-        val serialAge =
-            if (lastSerialPacketAt > 0L) now - lastSerialPacketAt
-            else Long.MAX_VALUE
-
-        val audioAge =
-            if (lastAudioPcmAt > 0L) now - lastAudioPcmAt
-            else Long.MAX_VALUE
-
-        val scopeAge =
-            if (lastScopeFrameAt > 0L) now - lastScopeFrameAt
-            else Long.MAX_VALUE
+        val controlAge = if (lastControlPacketAt > 0L) now - lastControlPacketAt else Long.MAX_VALUE
+        val serialAge = if (lastSerialPacketAt > 0L) now - lastSerialPacketAt else Long.MAX_VALUE
+        val audioAge = if (lastAudioPcmAt > 0L) now - lastAudioPcmAt else Long.MAX_VALUE
+        val scopeAge = if (lastScopeFrameAt > 0L) now - lastScopeFrameAt else Long.MAX_VALUE
 
         fun score(age: Long, goodMs: Long, fairMs: Long, badMs: Long): Int {
             return when {
@@ -5209,54 +5227,44 @@ class MainActivity : Activity() {
             }
         }
 
-        val controlScore =
-            if (!connected) 0
-            else score(controlAge, 1000L, 3000L, 8000L)
+        val controlScore = if (!connected) 0 else score(controlAge, NETWORK_GOOD_AGE_MS, 3000L, 8000L)
+        val serialScore = if (!serialOpen) 100 else score(serialAge, NETWORK_GOOD_AGE_MS, 3000L, 8000L)
+        val audioScore = if (!audioExpected) 100 else if (audioRunning) {
+            score(audioAge, NETWORK_GOOD_AGE_MS, AUDIO_RECOVERY_AFTER_MS, 6000L)
+        } else 20
+        val scopeScore = if (!scopeStarted) 100 else score(scopeAge, NETWORK_GOOD_AGE_MS, SCOPE_RECOVERY_AFTER_MS, 7000L)
 
-        val serialScore =
-            if (!serialOpen) 100
-            else score(serialAge, 1000L, 3000L, 8000L)
+        val weighted = (
+            controlScore * 20 +
+                    serialScore * 20 +
+                    audioScore * 35 +
+                    scopeScore * 25
+            ) / 100
 
-        val audioScore =
-            if (!audioExpected) 100
-            else if (audioRunning) {
-                score(audioAge, 1000L, 2500L, 6000L)
-            } else {
-                20
-            }
+        val activeScores = mutableListOf<Int>()
+        if (connected) activeScores.add(controlScore)
+        if (serialOpen) activeScores.add(serialScore)
+        if (audioExpected) activeScores.add(audioScore)
+        if (scopeStarted) activeScores.add(scopeScore)
 
-        val scopeScore =
-            if (!scopeStarted) 100
-            else score(scopeAge, 1500L, 3500L, 7000L)
-
-        val q =
-            (
-                controlScore * 20 +
-                        serialScore * 20 +
-                        audioScore * 35 +
-                        scopeScore * 25
-                ) / 100
+        val q = if (activeScores.isEmpty()) 0 else minOf(
+            weighted,
+            activeScores.minOrNull() ?: weighted
+        )
 
         val status = when {
             !connected -> "DISCONNECTED"
-            q >= 85 -> "GOOD"
+            q >= 85 && activeScores.all { it >= 85 } -> "GOOD"
             q >= 60 -> "FAIR"
             else -> "BAD"
         }
 
         synchronized(networkHistoryLock) {
-            if (networkHistory.size >= NETWORK_HISTORY_MAX_SAMPLES) {
-                networkHistory.removeFirst()
-            }
+            if (networkHistory.size >= NETWORK_HISTORY_MAX_SAMPLES) networkHistory.removeFirst()
             networkHistory.addLast(
                 NetworkQualitySample(
-                    now,
-                    controlAge,
-                    serialAge,
-                    audioAge,
-                    scopeAge,
-                    q.coerceIn(0, 100),
-                    status
+                    now, controlAge, serialAge, audioAge, scopeAge,
+                    q.coerceIn(0, 100), status
                 )
             )
         }
@@ -5269,7 +5277,6 @@ class MainActivity : Activity() {
                             "S=${networkAge(serialAge)} " +
                             "A=${networkAge(audioAge)} " +
                             "W=${networkAge(scopeAge)}"
-
                 updateNetworkQualityIndicator(q, status)
                 refreshNetworkHistoryUi()
             }
@@ -5332,11 +5339,17 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v27.3\n")
+        report.append("App version: v27.4\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
-            .append(" CI-V=").append(serialOpen).append(" Audio=").append(audioRunning).append("\n\n")
+            .append(" CI-V=").append(serialOpen)
+            .append(" Audio=").append(audioRunning)
+            .append(" Spectrum=").append(scopeStarted)
+            .append("\n")
+            .append("AudioPCM=").append(networkAge(if (lastAudioPcmAt > 0L) System.currentTimeMillis() - lastAudioPcmAt else Long.MAX_VALUE))
+            .append(" ScopeFrame=").append(networkAge(if (lastScopeFrameAt > 0L) System.currentTimeMillis() - lastScopeFrameAt else Long.MAX_VALUE))
+            .append("\n\n")
         report.append("time,quality,status,controlAgeMs,serialAgeMs,audioAgeMs,scopeAgeMs\n")
         samples.forEach { x ->
             report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(x.timestampMs)))
@@ -5393,8 +5406,8 @@ class MainActivity : Activity() {
 
                 openAudioReceive(radioIp)
 
-                lastAudioPcmAt = System.currentTimeMillis()
-                appendLog("AUDIO RECOVERY: stream reopened")
+                lastAudioPcmAt = 0L
+                appendLog("AUDIO RECOVERY: stream reopened; waiting for PCM")
                 addNetworkEvent("AUDIO RECOVERY: stream reopened")
             } catch (e: Exception) {
                 if (running) {
@@ -5443,8 +5456,9 @@ class MainActivity : Activity() {
                 }
 
                 startSpectrumScope()
+                lastScopeFrameAt = 0L
 
-                appendLog("SCOPE RECOVERY: spectrum stream restarted")
+                appendLog("SCOPE RECOVERY: spectrum stream restarted; waiting for frame")
                 addNetworkEvent("SCOPE RECOVERY: stream restarted")
             } catch (e: Exception) {
                 if (running) {
