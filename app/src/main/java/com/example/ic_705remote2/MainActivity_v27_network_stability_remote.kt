@@ -126,8 +126,12 @@ class MainActivity : Activity() {
     @Volatile private var audioExpected = false
     @Volatile private var audioRecoveryInProgress = false
     @Volatile private var scopeRecoveryInProgress = false
+    @Volatile private var audioRecoveryWaitingForPcm = false
+    @Volatile private var scopeRecoveryWaitingForFrame = false
     @Volatile private var lastAudioRecoveryAt = 0L
     @Volatile private var lastScopeRecoveryAt = 0L
+    @Volatile private var audioRecoveryAttempt = 0
+    @Volatile private var scopeRecoveryAttempt = 0
     @Volatile private var lastCommonStallAt = 0L
 
     private data class NetworkQualitySample(
@@ -247,7 +251,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.4"
+        titleBanner.text = "IC-705 Remote Control  •  v27.5"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -2480,6 +2484,12 @@ class MainActivity : Activity() {
         // Count only real PCM audio as healthy audio. PKT7 keepalives
         // do not reset the audio-quality timer.
         lastAudioPcmAt = System.currentTimeMillis()
+                if (audioRecoveryWaitingForPcm) {
+                    audioRecoveryWaitingForPcm = false
+                    audioRecoveryAttempt = 0
+                    appendLog("AUDIO RECOVERY: PCM RESTORED")
+                    addNetworkEvent("AUDIO RECOVERY: PCM RESTORED")
+                }
 
         audioHaveSequence = true
         audioLastSequence = sequence
@@ -3959,6 +3969,12 @@ class MainActivity : Activity() {
         val samples = IntArray(count)
         for (i in 0 until count) samples[i] = waveform[startIndex + i].toInt() and 0xFF
         lastScopeFrameAt = System.currentTimeMillis()
+        if (scopeRecoveryWaitingForFrame) {
+            scopeRecoveryWaitingForFrame = false
+            scopeRecoveryAttempt = 0
+            appendLog("SCOPE RECOVERY: 27 00 FRAME RESTORED")
+            addNetworkEvent("SCOPE RECOVERY: 27 00 FRAME RESTORED")
+        }
         scopeDecodedFrames++
         scopeUiUpdateCounter++
         if (::scopeView.isInitialized) scopeView.updateSpectrum(centerHz, totalSpanHz, samples)
@@ -5339,7 +5355,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v27.4\n")
+        report.append("App version: v27.5\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
@@ -5372,6 +5388,9 @@ class MainActivity : Activity() {
         }
 
         audioRecoveryInProgress = true
+        audioRecoveryAttempt++
+        appendLog("AUDIO RECOVERY ATTEMPT #$audioRecoveryAttempt")
+        addNetworkEvent("AUDIO RECOVERY ATTEMPT #$audioRecoveryAttempt")
 
         Thread {
             try {
@@ -5390,6 +5409,22 @@ class MainActivity : Activity() {
                 try { audioTrack?.release() } catch (_: Exception) {}
                 audioTrack = null
 
+                try {
+                    val socket = audioSocket
+                    if (socket != null && !socket.isClosed &&
+                        audioLocalSid != 0 && audioRemoteSid != 0) {
+                        val disconnect = ByteArray(16)
+                        disconnect[0] = 0x10.toByte()
+                        disconnect[4] = 0x05
+                        writeBeInt(disconnect, 8, audioLocalSid)
+                        writeBeInt(disconnect, 12, audioRemoteSid)
+                        try { socket.send(DatagramPacket(disconnect, disconnect.size)) } catch (_: Exception) {}
+                        Thread.sleep(50)
+                        try { socket.send(DatagramPacket(disconnect, disconnect.size)) } catch (_: Exception) {}
+                        appendLog("AUDIO RECOVERY: disconnect sent twice")
+                    }
+                } catch (_: Exception) {}
+
                 try { audioSocket?.close() } catch (_: Exception) {}
                 audioSocket = null
 
@@ -5407,8 +5442,9 @@ class MainActivity : Activity() {
                 openAudioReceive(radioIp)
 
                 lastAudioPcmAt = 0L
-                appendLog("AUDIO RECOVERY: stream reopened; waiting for PCM")
-                addNetworkEvent("AUDIO RECOVERY: stream reopened")
+                audioRecoveryWaitingForPcm = true
+                appendLog("AUDIO RECOVERY: handshake complete; WAITING FOR PCM")
+                addNetworkEvent("AUDIO RECOVERY: handshake complete; WAITING FOR PCM")
             } catch (e: Exception) {
                 if (running) {
                     appendLog("AUDIO RECOVERY FAILED: ${e.message}")
@@ -5430,6 +5466,9 @@ class MainActivity : Activity() {
         }
 
         scopeRecoveryInProgress = true
+        scopeRecoveryAttempt++
+        appendLog("SCOPE RECOVERY ATTEMPT #$scopeRecoveryAttempt")
+        addNetworkEvent("SCOPE RECOVERY ATTEMPT #$scopeRecoveryAttempt")
 
         Thread {
             try {
@@ -5457,9 +5496,10 @@ class MainActivity : Activity() {
 
                 startSpectrumScope()
                 lastScopeFrameAt = 0L
+                scopeRecoveryWaitingForFrame = true
 
-                appendLog("SCOPE RECOVERY: spectrum stream restarted; waiting for frame")
-                addNetworkEvent("SCOPE RECOVERY: stream restarted")
+                appendLog("SCOPE RECOVERY: restarted; WAITING FOR 27 00")
+                addNetworkEvent("SCOPE RECOVERY: restarted; WAITING FOR 27 00")
             } catch (e: Exception) {
                 if (running) {
                     appendLog("SCOPE RECOVERY FAILED: ${e.message}")
@@ -5716,6 +5756,10 @@ class MainActivity : Activity() {
         audioExpected = false
         audioRecoveryInProgress = false
         scopeRecoveryInProgress = false
+        audioRecoveryWaitingForPcm = false
+        scopeRecoveryWaitingForFrame = false
+        audioRecoveryAttempt = 0
+        scopeRecoveryAttempt = 0
         lastAudioPcmAt = 0L
         lastScopeFrameAt = 0L
         cleanupSocketOnly()
@@ -6053,11 +6097,3 @@ class MainActivity : Activity() {
             canvas.drawLine(0f,spectrumHeight,w,spectrumHeight,gridPaint)
             val rows=synchronized(this){waterfall.toList()}; val rowHeight=maxOf(1f,(h-spectrumHeight-2f)/WATERFALL_ROWS.toFloat())
             for(r in rows.indices) drawWaterfallRow(canvas,rows[r],spectrumHeight+r*rowHeight,w,rowHeight)
-        }
-        private fun drawWaterfallRow(canvas:Canvas,row:IntArray,y:Float,width:Float,rowHeight:Float){ if(row.isEmpty())return; val denom=maxOf(1,160-noiseFloor); for(i in row.indices){val adjusted=maxOf(0,row[i]-noiseFloor); val level=((adjusted.toFloat()/denom)*sensitivity).coerceIn(0f,1f); val paint=Paint().apply{color=Color.rgb((8+247*level).toInt().coerceIn(0,255),(12+180*level*level).toInt().coerceIn(0,255),(25+225*level).toInt().coerceIn(0,255))}; val x0=i.toFloat()/row.size*width; val x1=(i+1).toFloat()/row.size*width; canvas.drawRect(x0,y,x1+1f,y+rowHeight+1f,paint)}}
-        private fun drawFrequencyLabels(canvas:Canvas,width:Float,spectrumHeight:Float){val center=centerFrequencyHz;if(center<=0L)return; val visibleHz=minOf(displayBandwidthKHz.toLong()*1000L,totalSpanFrequencyHz); val left=formatMHz(center-visibleHz/2); val mid=formatMHz(center); val right=formatMHz(center+visibleHz/2); canvas.drawText(left,6f,spectrumHeight-4f,textPaint); val mw=textPaint.measureText(mid); canvas.drawText(mid,width/2f-mw/2f,spectrumHeight-4f,textPaint); val rw=textPaint.measureText(right); canvas.drawText(right,width-rw-6f,spectrumHeight-4f,textPaint)}
-        private fun formatMHz(hz:Long):String=String.format(java.util.Locale.US,"%.6f",hz/1_000_000.0)
-    }
-
-
-}
