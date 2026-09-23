@@ -5997,6 +5997,14 @@ class MainActivity : Activity() {
         Log.d("IC705Remote", "UI log cleared")
     }
 
+    private fun networkAge(ageMs: Long): String {
+        return if (ageMs == Long.MAX_VALUE) {
+            "N/A"
+        } else {
+            "${ageMs}ms"
+        }
+    }
+
     private fun appendLog(
         message: String
     ) {
