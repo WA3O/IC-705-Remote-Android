@@ -68,8 +68,6 @@ class MainActivity : Activity() {
         private const val NETWORK_GOOD_AGE_MS = 1000L
         private const val NETWORK_COMMON_STALL_AFTER_MS = 1500L
         private const val NETWORK_COMMON_STALL_COOLDOWN_MS = 6000L
-        // v27.9 diagnostic: never loop media recovery indefinitely without PCM/frame.
-        private const val MAX_MEDIA_RECOVERY_ATTEMPTS = 1
 
         private const val PREFS_NAME = "ic705_remote_settings"
         private const val PREF_IP = "ic705_ip"
@@ -258,7 +256,7 @@ class MainActivity : Activity() {
         val topSpacer = View(this)
         // Compact title banner at the very top of the screen.
         val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v27.9"
+        titleBanner.text = "IC-705 Remote Control  •  v27.8"
         titleBanner.textSize = 18f
         titleBanner.setTextColor(Color.WHITE)
         titleBanner.setBackgroundColor(Color.BLACK)
@@ -5438,7 +5436,7 @@ class MainActivity : Activity() {
         val events = synchronized(networkHistoryLock) { networkEvents.toList() }
         val report = StringBuilder()
         report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v27.9\n")
+        report.append("App version: v27.8\n")
         report.append("Generated: ")
         report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
         report.append("\nConnected=").append(connected).append(" Running=").append(running)
@@ -5472,11 +5470,7 @@ class MainActivity : Activity() {
     }
 
     private fun recoverAudioStream() {
-        if (!running || !audioExpected || audioRecoveryInProgress || audioRecoveryAttempt >= MAX_MEDIA_RECOVERY_ATTEMPTS) {
-            if (running && audioExpected && audioRecoveryAttempt >= MAX_MEDIA_RECOVERY_ATTEMPTS) {
-                appendLog("AUDIO MEDIA FAILURE: recovery limit reached; PKT7/PCM state will be observed without another socket reset")
-                addNetworkEvent("AUDIO MEDIA FAILURE: recovery limit reached")
-            }
+        if (!running || !audioExpected || audioRecoveryInProgress) {
             return
         }
 
@@ -5539,7 +5533,7 @@ class MainActivity : Activity() {
 
                 lastAudioPcmAt = 0L
                 audioRecoveryWaitingForPcm = true
-                appendLog("AUDIO RECOVERY: handshake complete; WAITING FOR PCM (no second socket reset)")
+                appendLog("AUDIO RECOVERY: handshake complete; WAITING FOR PCM")
                 addNetworkEvent("AUDIO RECOVERY: handshake complete; WAITING FOR PCM")
             } catch (e: Exception) {
                 if (running) {
@@ -5557,11 +5551,7 @@ class MainActivity : Activity() {
     }
 
     private fun recoverSpectrumStream() {
-        if (!running || !serialOpen || !scopeStarted || scopeRecoveryInProgress || scopeRecoveryAttempt >= MAX_MEDIA_RECOVERY_ATTEMPTS) {
-            if (running && serialOpen && scopeStarted && scopeRecoveryAttempt >= MAX_MEDIA_RECOVERY_ATTEMPTS) {
-                appendLog("SCOPE MEDIA FAILURE: recovery limit reached; waiting for a real 27 00 frame")
-                addNetworkEvent("SCOPE MEDIA FAILURE: recovery limit reached")
-            }
+        if (!running || !serialOpen || !scopeStarted || scopeRecoveryInProgress) {
             return
         }
 
@@ -5598,7 +5588,7 @@ class MainActivity : Activity() {
                 lastScopeFrameAt = 0L
                 scopeRecoveryWaitingForFrame = true
 
-                appendLog("SCOPE RECOVERY: restarted; WAITING FOR 27 00 (no second restart)")
+                appendLog("SCOPE RECOVERY: restarted; WAITING FOR 27 00")
                 addNetworkEvent("SCOPE RECOVERY: restarted; WAITING FOR 27 00")
             } catch (e: Exception) {
                 if (running) {
