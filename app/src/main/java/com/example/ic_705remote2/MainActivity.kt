@@ -1,29 +1,38 @@
+Warning: truncated output (original token count: 50177)
+Total output lines: 5935
+
 package com.example.ic_705remote2
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.text.InputType
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.ScrollView
 import android.widget.TextView
 import java.io.ByteArrayOutputStream
 import java.net.DatagramPacket
@@ -34,9 +43,20 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 class MainActivity : Activity() {
+    private val udpRecoveryGuard = AtomicBoolean(false)
+    private val audioRecoveryGuard = AtomicBoolean(false)
+    @Volatile private var automaticReconnectAttempts = 0
+    @Volatile private var automaticReconnectRestoreScope = false
     companion object {
+        private const val APP_VERSION = "v28.19"
+        private const val MAX_AUTO_RECONNECT_ATTEMPTS = 3
+        private const val NETWORK_RECONNECT_DELAY_MS = 100L
+        private const val STREAM_STALL_TIMEOUT_MS = 600L
+        private const val AUDIO_STALL_TIMEOUT_MS = 400L
+        private const val AUDIO_RECOVERY_RETRY_COOLDOWN_MS = 750L
         private const val CONTROL_PORT = 50001
         private const val SERIAL_PORT = 50002
         private const val AUDIO_PORT = 50003
@@ -54,39 +74,23 @@ class MainActivity : Activity() {
         private const val TX_BUFFER_LENGTH_MS = 300
         private const val SCOPE_POLL_INTERVAL_MS = 500L
         private const val SIGNAL_METER_POLL_INTERVAL_MS = 500L
-        private const val NETWORK_WATCHDOG_INTERVAL_MS = 1000L
-        private const val NETWORK_WARN_AFTER_MS = 5000L
-        private const val NETWORK_RESTART_AFTER_MS = 8000L
-        private const val NETWORK_HISTORY_MAX_SAMPLES = 300
-        private const val NETWORK_EVENT_MAX_ENTRIES = 200
-
-        // v27.3: allow short UDP jitter/silence before local stream recovery.
-        private const val AUDIO_RECOVERY_AFTER_MS = 2500L
-        private const val AUDIO_RECOVERY_COOLDOWN_MS = 6000L
-        private const val SCOPE_RECOVERY_AFTER_MS = 3500L
-        private const val SCOPE_RECOVERY_COOLDOWN_MS = 7000L
-        private const val NETWORK_GOOD_AGE_MS = 1000L
-        private const val NETWORK_COMMON_STALL_AFTER_MS = 1500L
-        private const val NETWORK_COMMON_STALL_COOLDOWN_MS = 6000L
-        // v28.4: only rebuild the complete session when BOTH control and CI-V have been silent for a sustained period.
-        private const val FULL_SESSION_RECOVERY_AFTER_MS = 8000L
-        private const val FULL_SESSION_RECOVERY_COOLDOWN_MS = 15000L
-        private const val MEDIA_RECOVERY_MAX_ATTEMPTS = 3
-        private const val MEDIA_RECOVERY_PAUSE_MS = 30000L
 
         private const val PREFS_NAME = "ic705_remote_settings"
         private const val PREF_IP = "ic705_ip"
         private const val PREF_USERNAME = "ic705_username"
         private const val PREF_PASSWORD = "ic705_password"
+        private const val PREF_SPECTRUM_WINDOW_SIZE_DP = "spectrum_window_size_dp"
+        private const val PREF_WATERFALL_PALETTE = "waterfall_palette"
     }
     private lateinit var settingsIpEdit: EditText
     private lateinit var settingsUsernameEdit: EditText
     private lateinit var settingsPasswordEdit: EditText
     private lateinit var mainPane: LinearLayout
     private lateinit var settingsPane: LinearLayout
-    private lateinit var networkPane: LinearLayout
     private lateinit var connectButton: Button
     private lateinit var disconnectButton: Button
+    private lateinit var linkQualityLight: View
+    private lateinit var linkQualityText: TextView
     private lateinit var frequencyEdit: EditText
     private lateinit var frequencyLabelView: TextView
     private lateinit var setFrequencyButton: Button
@@ -100,15 +104,13 @@ class MainActivity : Activity() {
     private lateinit var sensitivityLabel: TextView
     private lateinit var sensitivityRow: LinearLayout
     private lateinit var bandwidthLabel: TextView
+    private lateinit var spectrumSizeLabel: TextView
     private lateinit var noiseFloorLabel: TextView
     private lateinit var scopeInfoText: TextView
     private lateinit var scopeToggleButton: Button
     private lateinit var scopeView: SpectrumWaterfallView
     private lateinit var signalMeterLabel: TextView
     private lateinit var signalMeterBar: ProgressBar
-    private lateinit var networkQualitySummary: TextView
-    private lateinit var networkHistoryText: TextView
-    private lateinit var networkQualityIndicator: TextView
     private var controlSocket: DatagramSocket? = null
     private var serialSocket: DatagramSocket? = null
     private var audioSocket: DatagramSocket? = null
@@ -119,49 +121,7 @@ class MainActivity : Activity() {
     private var serialScheduler: ScheduledExecutorService? = null
     private var audioScheduler: ScheduledExecutorService? = null
     private var signalMeterScheduler: ScheduledExecutorService? = null
-    private var networkWatchdogScheduler: ScheduledExecutorService? = null
     private var audioReceiverThread: Thread? = null
-    @Volatile private var lastControlPacketAt = 0L
-    @Volatile private var lastSerialPacketAt = 0L
-    @Volatile private var lastAudioPacketAt = 0L
-    @Volatile private var lastAudioRxAt = 0L
-    @Volatile private var lastAudioPcmAt = 0L
-    @Volatile private var audioRxPacketCount = 0L
-    @Volatile private var audioPcmPacketCount = 0L
-    @Volatile private var audioPkt7RxCount = 0L
-    @Volatile private var audioLocalPort = 0
-    @Volatile private var lastScopeFrameAt = 0L
-    @Volatile private var networkWarningLogged = false
-
-    @Volatile private var audioExpected = false
-    @Volatile private var audioRecoveryInProgress = false
-    @Volatile private var scopeRecoveryInProgress = false
-    @Volatile private var audioRecoveryWaitingForPcm = false
-    @Volatile private var scopeRecoveryWaitingForFrame = false
-    @Volatile private var lastAudioRecoveryAt = 0L
-    @Volatile private var lastScopeRecoveryAt = 0L
-    @Volatile private var audioRecoveryWaitUntilAt = 0L
-    @Volatile private var scopeRecoveryWaitUntilAt = 0L
-    @Volatile private var audioRecoveryPausedUntilAt = 0L
-    @Volatile private var scopeRecoveryPausedUntilAt = 0L
-    @Volatile private var audioRecoveryAttempt = 0
-    @Volatile private var scopeRecoveryAttempt = 0
-    @Volatile private var lastCommonStallAt = 0L
-    @Volatile private var fullSessionRecoveryInProgress = false
-    @Volatile private var lastFullSessionRecoveryAt = 0L
-
-    private data class NetworkQualitySample(
-        val timestampMs: Long,
-        val controlAgeMs: Long,
-        val serialAgeMs: Long,
-        val audioAgeMs: Long,
-        val scopeAgeMs: Long,
-        val quality: Int,
-        val status: String
-    )
-    private val networkHistory = ArrayDeque<NetworkQualitySample>()
-    private val networkEvents = ArrayDeque<String>()
-    private val networkHistoryLock = Any()
     @Volatile
     private var running = false
     @Volatile
@@ -195,6 +155,16 @@ class MainActivity : Activity() {
     private val sendLock = Any()
     private val trackedPackets = ConcurrentHashMap<Int, ByteArray>()
     private val serialTrackedPackets = ConcurrentHashMap<Int, ByteArray>()
+    // Track incoming UDP sequence gaps independently for the audio and CI-V streams.
+    // The IC-705 can retransmit a missing stream packet when asked with type 0x01.
+    private data class ReceiveSequenceState(
+        var newest: Int? = null,
+        val missing: LinkedHashMap<Int, Int> = LinkedHashMap()
+    )
+    private val audioReceiveSequenceState = ReceiveSequenceState()
+    private val serialReceiveSequenceState = ReceiveSequenceState()
+    private val maxTrackedReceiveGaps = 16
+    private val maxReceiveRetransmitRequests = 4
     @Volatile
     private var serialOpen = false
     @Volatile
@@ -204,6 +174,63 @@ class MainActivity : Activity() {
     private var audioLastSequence = 0
     private var audioPacketCount = 0L
     private var audioDebugPacketCount = 0
+    @Volatile private var audioWriteCalls = 0L
+    @Volatile private var audioWriteBytes = 0L
+    @Volatile private var audioWriteErrors = 0L
+    @Volatile private var audioLastPacketAtMs = 0L
+    @Volatile private var audioLastWriteAtMs = 0L
+    @Volatile private var scopeLastTransportAtMs = 0L
+    @Volatile private var scopeLastRawFrameAtMs = 0L
+    @Volatile private var scopeLastDecodedAtMs = 0L
+    private val streamDiagnosticHandler = Handler(Looper.getMainLooper())
+    private val streamStallWatchdog = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val now = System.currentTimeMillis()
+            requestNextMissingPacket(audioReceiveSequenceState, audioSocket, audioLocalSid, audioRemoteSid, "audio")
+            requestNextMissingPacket(serialReceiveSequenceState, serialSocket, serialLocalSid, serialRemoteSid, "serial")
+            val audioReferenceAt = if (audioLastPacketAtMs > 0L) audioLastPacketAtMs else audioStreamExpectedSinceAtMs
+            val audioAge = if (audioReferenceAt > 0L) now - audioReferenceAt else Long.MAX_VALUE
+            val serialAge = if (scopeLastTransportAtMs > 0L) now - scopeLastTransportAtMs else Long.MAX_VALUE
+            updateLinkQuality(audioAge, serialAge)
+            // Escalate only when both receive streams are genuinely silent. This
+            // clock uses last received audio payload, never a new PKT3/PKT6 handshake.
+            if (connected && serialOpen && audioStreamExpected && scopeStarted &&
+                audioAge >= STREAM_STALL_TIMEOUT_MS && serialAge >= STREAM_STALL_TIMEOUT_MS) {
+                beginNetworkRecovery("audio and serial/scope streams silent for ${maxOf(audioAge, serialAge)} ms")
+                return
+            }
+            if (connected && audioStreamExpected && !audioRecoveryGuard.get() &&
+                now >= audioRecoveryNotBeforeMs &&
+                ((audioRunning && audioAge >= AUDIO_STALL_TIMEOUT_MS) || !audioRunning)) {
+                beginAudioStreamRecovery(if (audioRunning) "audio packets silent for ${audioAge} ms" else "audio stream is inactive")
+            }
+            streamDiagnosticHandler.postDelayed(this, 100L)
+        }
+    }
+    private val streamDiagnosticTask = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val now = System.currentTimeMillis()
+            appendLog(
+                "STREAM DIAG $APP_VERSION connected=$connected serialOpen=$serialOpen " +
+                        "audioRunning=$audioRunning audioRxPackets=$audioPacketCount " +
+                        "audioRxAgo=${diagnosticAge(now, audioLastPacketAtMs)} " +
+                        "audioWriteCalls=$audioWriteCalls audioWriteBytes=$audioWriteBytes " +
+                        "audioWriteErrors=$audioWriteErrors " +
+                        "audioWriteAgo=${diagnosticAge(now, audioLastWriteAtMs)} " +
+                        "scopeStarted=$scopeStarted c1Packets=$scopeTransportPackets " +
+                        "c1Ago=${diagnosticAge(now, scopeLastTransportAtMs)} " +
+                        "rawScopeFrames=$scopeRaw27Frames " +
+                        "rawScopeAgo=${diagnosticAge(now, scopeLastRawFrameAtMs)} " +
+                        "decodedScopeFrames=$scopeDecodedFrames " +
+                        "decodedScopeAgo=${diagnosticAge(now, scopeLastDecodedAtMs)}"
+            )
+            streamDiagnosticHandler.postDelayed(this, 5000L)
+        }
+    }
+    private fun diagnosticAge(now: Long, then: Long): String =
+        if (then <= 0L) "never" else "${(now - then).coerceAtLeast(0L)}ms"
     @Volatile
     private var frequencyReceived = false
     @Volatile
@@ -211,6 +238,15 @@ class MainActivity : Activity() {
     @Volatile
     private var frequencyWriteRejected = false
     private var frequencyHz: Long = 0L
+    @Volatile private var activeRadioIp: String = ""
+    @Volatile private var activeUsername: String = ""
+    @Volatile private var activePassword: String = ""
+    @Volatile private var audioStreamExpected = false
+    @Volatile private var audioStreamExpectedSinceAtMs = 0L
+    @Volatile private var audioRecoveryNotBeforeMs = 0L
+    @Volatile private var autoSidebandChangePending = false
+    @Volatile private var lastLinkQualityLabel = ""
+    private val autoSidebandLock = Any()
     @Volatile
     private var signalMeterValue = 0
     @Volatile
@@ -228,6 +264,10 @@ class MainActivity : Activity() {
     private var scopeDecodedFrames = 0L
     @Volatile
     private var requestedDisplayBandwidthKHz = 75
+    @Volatile
+    private var waterfallPaletteIndex = 0
+    @Volatile
+    private var requestedSpectrumWindowSizeDp = 300
     @Volatile
     private var scopeUiUpdateCounter = 0L
     @Volatile
@@ -252,109 +292,87 @@ class MainActivity : Activity() {
     private var modeReceived = false
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        title = "IC-705 Remote Control $APP_VERSION"
         buildUserInterface()
     }
     private fun buildUserInterface() {
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setPadding(8, 0, 8, 8)
-        root.setBackgroundColor(Color.rgb(18, 18, 18))
+        // Move the tabs and all screen controls below the black title bar.
+        root.setPadding(12, dp(120), 12, dp(12))
 
-        // Extra top space requested for the Samsung display.
-        // This moves the complete application UI down without changing
-        // the working controls or IC-705 protocol code.
-        val topSpacer = View(this)
-        // Compact title banner at the very top of the screen.
-        val titleBanner = TextView(this)
-        titleBanner.text = "IC-705 Remote Control  •  v28.4"
-        titleBanner.textSize = 18f
-        titleBanner.setTextColor(Color.WHITE)
-        titleBanner.setBackgroundColor(Color.BLACK)
-        titleBanner.gravity = Gravity.CENTER
-        val titleBannerParams =
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(32)
-            )
-        // Put the entire application UI immediately below the title banner.
-        // No large top spacer is used, so all controls move upward.
-        titleBannerParams.topMargin = dp(36)
-        root.addView(titleBanner, titleBannerParams)
+        // Keep frequency entry above the tab buttons and outside the scrolling
+        // MAIN pane so it remains visible when the on-screen keyboard opens.
+        val frequencyRow = LinearLayout(this)
+        frequencyRow.orientation = LinearLayout.HORIZONTAL
+        frequencyRow.gravity = Gravity.CENTER_VERTICAL
 
-        // Very small live network-quality indicator.
-        networkQualityIndicator = TextView(this)
-        networkQualityIndicator.text = "●"
-        networkQualityIndicator.textSize = 11f
-        networkQualityIndicator.gravity = Gravity.CENTER
-        networkQualityIndicator.setTextColor(Color.RED)
-        networkQualityIndicator.contentDescription = "Network quality"
+        frequencyEdit = EditText(this)
+        frequencyEdit.setSingleLine(true)
+        frequencyEdit.hint = "Enter frequency in Hz"
+        frequencyEdit.inputType =
+            InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        frequencyRow.addView(
+            frequencyEdit,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f)
+        )
+
+        setFrequencyButton = Button(this)
+        setFrequencyButton.text = "SET FREQUENCY"
+        setFrequencyButton.isEnabled = false
+        frequencyRow.addView(
+            setFrequencyButton,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.25f)
+        )
         root.addView(
-            networkQualityIndicator,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(14)
+            frequencyRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
-        // Keep only a small gap below the banner.
-        root.addView(
-            topSpacer,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(8)
-            )
-        )
-
-        // Fixed tab bar: it is outside the scrolling pages so it cannot
-        // disappear above the top of a small Samsung display.
         val tabRow = LinearLayout(this)
         tabRow.orientation = LinearLayout.HORIZONTAL
-        tabRow.gravity = Gravity.CENTER_VERTICAL
-        tabRow.setBackgroundColor(Color.rgb(35, 35, 35))
+        tabRow.gravity = Gravity.CENTER
 
         val mainTabButton = Button(this)
         mainTabButton.text = "MAIN"
-        mainTabButton.textSize = 16f
-        mainTabButton.minHeight = dp(56)
 
         val settingsTabButton = Button(this)
         settingsTabButton.text = "SETTINGS"
-        settingsTabButton.textSize = 16f
-        settingsTabButton.minHeight = dp(56)
-
-        val networkTabButton = Button(this)
-        networkTabButton.text = "NETWORK"
-        networkTabButton.textSize = 16f
-        networkTabButton.minHeight = dp(56)
 
         tabRow.addView(
             mainTabButton,
-            android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
+            LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
         )
         tabRow.addView(
             settingsTabButton,
-            android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
+            LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
         )
-        tabRow.addView(
-            networkTabButton,
-            android.widget.LinearLayout.LayoutParams(0, dp(56), 1f)
+        root.addView(
+            tabRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         )
 
         mainPane = LinearLayout(this)
         mainPane.orientation = LinearLayout.VERTICAL
-        // Extra top space for Samsung displays so Spectrum controls/sliders
-        // are clearly visible below the phone's status area.
-        mainPane.setPadding(4, 4, 4, 16)
-        mainPane.setBackgroundColor(Color.rgb(18, 18, 18))
 
         settingsPane = LinearLayout(this)
         settingsPane.orientation = LinearLayout.VERTICAL
-        settingsPane.setPadding(4, 4, 4, 16)
-
-        networkPane = LinearLayout(this)
-        networkPane.orientation = LinearLayout.VERTICAL
-        networkPane.setPadding(4, 4, 4, 16)
+        settingsPane.visibility = View.GONE
 
         fun addLabel(
             parent: LinearLayout,
@@ -366,9 +384,9 @@ class MainActivity : Activity() {
             label.setPadding(0, 6, 0, 2)
             parent.addView(
                 label,
-                android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             )
         }
@@ -388,9 +406,9 @@ class MainActivity : Activity() {
             }
             parent.addView(
                 edit,
-                android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             )
             return edit
@@ -423,6 +441,9 @@ class MainActivity : Activity() {
                 ""
             ) ?: ""
 
+        requestedSpectrumWindowSizeDp = preferences.getInt(PREF_SPECTRUM_WINDOW_SIZE_DP, 300).coerceIn(140, 600)
+        waterfallPaletteIndex = preferences.getInt(PREF_WATERFALL_PALETTE, 0).coerceIn(0, 4)
+
         addLabel(settingsPane, "IC-705 IP Address")
         settingsIpEdit = addEditField(settingsPane, savedIp)
         settingsIpEdit.inputType = InputType.TYPE_CLASS_PHONE
@@ -445,9 +466,9 @@ class MainActivity : Activity() {
         settingsNote.setPadding(0, 8, 0, 8)
         settingsPane.addView(
             settingsNote,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -455,9 +476,9 @@ class MainActivity : Activity() {
         saveSettingsButton.text = "SAVE SETTINGS"
         settingsPane.addView(
             saveSettingsButton,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -465,43 +486,6 @@ class MainActivity : Activity() {
             saveNetworkSettings()
             mainTabButton.performClick()
         }
-
-        // ----------------------------
-        // NETWORK QUALITY HISTORY TAB
-        // ----------------------------
-        val networkTitle = TextView(this)
-        networkTitle.text = "NETWORK QUALITY HISTORY"
-        networkTitle.textSize = 20f
-        networkPane.addView(networkTitle)
-
-        networkQualitySummary = TextView(this)
-        networkQualitySummary.text = "Quality: waiting for connection"
-        networkQualitySummary.textSize = 17f
-        networkPane.addView(networkQualitySummary)
-
-        networkHistoryText = TextView(this)
-        networkHistoryText.text = "No network samples yet."
-        networkHistoryText.textSize = 12f
-        networkHistoryText.typeface = Typeface.MONOSPACE
-        networkHistoryText.setTextIsSelectable(true)
-        val networkHistoryScroll = ScrollView(this)
-        networkHistoryScroll.addView(networkHistoryText)
-
-        val networkButtonRow = LinearLayout(this)
-        networkButtonRow.orientation = LinearLayout.HORIZONTAL
-
-        val copyNetworkButton = Button(this)
-        copyNetworkButton.text = "COPY REPORT"
-        copyNetworkButton.setOnClickListener { copyNetworkDiagnosticReport() }
-        networkButtonRow.addView(copyNetworkButton, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
-
-        val clearNetworkButton = Button(this)
-        clearNetworkButton.text = "CLEAR"
-        clearNetworkButton.setOnClickListener { clearNetworkHistory() }
-        networkButtonRow.addView(clearNetworkButton, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-
-        networkPane.addView(networkButtonRow)
-        networkPane.addView(networkHistoryScroll, android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, dp(500)))
 
         // ----------------------------
         // MAIN TAB - SPECTRUM FIRST
@@ -514,76 +498,108 @@ class MainActivity : Activity() {
         scopeToggleButton.text = "SPECTRUM ON"
         scopeToggleButton.isEnabled = false
 
+        val waterfallColorButton = Button(this)
+        waterfallColorButton.text = "COLOR: ${waterfallPaletteName(waterfallPaletteIndex)}"
+        waterfallColorButton.setOnClickListener {
+            val choices = arrayOf("Blue", "Green", "Amber", "Purple", "Grayscale")
+            AlertDialog.Builder(this)
+                .setTitle("Select waterfall color")
+                .setSingleChoiceItems(choices, waterfallPaletteIndex) { dialog, which ->
+                    waterfallPaletteIndex = which.coerceIn(0, choices.lastIndex)
+                    scopeView.setWaterfallPalette(waterfallPaletteIndex)
+                    waterfallColorButton.text = "COLOR: ${waterfallPaletteName(waterfallPaletteIndex)}"
+                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                        .putInt(PREF_WATERFALL_PALETTE, waterfallPaletteIndex)
+                        .apply()
+                    dialog.dismiss()
+                }
+                .setNegativeButton("CANCEL", null)
+                .show()
+        }
+
         scopeControlRow.addView(
             scopeToggleButton,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+        scopeControlRow.addView(
+            waterfallColorButton,
+            LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
             )
         )
 
         mainPane.addView(
             scopeControlRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
-        scopeView = SpectrumWaterfallView(this)
-        scopeView.onFrequencyTouch = { targetHz ->
-            setFrequencyFromSpectrum(targetHz)
-        }
-        scopeView.minimumHeight = dp(300)
-        // Keep the spectrum/waterfall at a real height.  The previous
-        // weight-based height could collapse it inside the ScrollView and
-        // make the controls below it appear to disappear.
+        spectrumSizeLabel = TextView(this)
+        spectrumSizeLabel.text = "Spectrum window size: ${requestedSpectrumWindowSizeDp} dp high"
+        spectrumSizeLabel.textSize = 14f
         mainPane.addView(
-            scopeView,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(300)
+            spectrumSizeLabel,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
-        scopeView.visibility = View.GONE
 
-        // Spectrum / waterfall display-size control.  This was accidentally
-        // omitted in the previous layout revision.
-        val scopeSizeRow = LinearLayout(this)
-        scopeSizeRow.orientation = LinearLayout.HORIZONTAL
-        scopeSizeRow.gravity = Gravity.CENTER_VERTICAL
-
-        val scopeSizeLabel = TextView(this)
-        scopeSizeLabel.text = "Spectrum / Waterfall Size: 25 px"
-        scopeSizeLabel.textSize = 14f
-        scopeSizeRow.addView(
-            scopeSizeLabel,
-            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
-        )
-
-        val scopeSizeSeek = SeekBar(this)
-        scopeSizeSeek.min = 0
-        scopeSizeSeek.max = 600
-        scopeSizeSeek.progress = 25
-        scopeSizeSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+        val spectrumSizeSeekBar = SeekBar(this)
+        spectrumSizeSeekBar.min = 140
+        spectrumSizeSeekBar.max = 600
+        spectrumSizeSeekBar.progress = requestedSpectrumWindowSizeDp
+        spectrumSizeSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val newHeight = progress.coerceIn(0, 600)
-                scopeSizeLabel.text = "Spectrum / Waterfall Size: ${newHeight} px"
-                scopeView.minimumHeight = dp(newHeight)
-                scopeView.layoutParams = scopeView.layoutParams.apply { this.height = dp(newHeight) }
-                scopeView.requestLayout()
+                requestedSpectrumWindowSizeDp = progress.coerceIn(140, 600)
+                spectrumSizeLabel.text = "Spectrum window size: ${requestedSpectrumWindowSizeDp} dp high"
+                if (::scopeView.isInitialized) {
+                    scopeView.layoutParams = scopeView.layoutParams.apply {
+                        height = dp(requestedSpectrumWindowSizeDp)
+                    }
+                    scopeView.minimumHeight = dp(140)
+                    scopeView.requestLayout()
+                }
+                if (fromUser) {
+                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                        .putInt(PREF_SPECTRUM_WINDOW_SIZE_DP, requestedSpectrumWindowSizeDp)
+                        .apply()
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-        scopeSizeRow.addView(
-            scopeSizeSeek,
-            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
-        )
         mainPane.addView(
-            scopeSizeRow,
-            android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+            spectrumSizeSeekBar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         )
+
+        scopeView = SpectrumWaterfallView(this)
+        scopeView.setWaterfallPalette(waterfallPaletteIndex)
+        scopeView.minimumHeight = dp(140)
+        scopeView.onTuneFrequency = { targetHz ->
+            frequencyEdit.setText(targetHz.toString())
+            tuneFrequencyTo(targetHz, "Spectrum tap")
+        }
+        mainPane.addView(
+            scopeView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(requestedSpectrumWindowSizeDp)
+            )
+        )
+        scopeView.visibility = View.GONE
 
         sensitivityRow = LinearLayout(this)
         sensitivityRow.visibility = View.GONE
@@ -595,9 +611,9 @@ class MainActivity : Activity() {
         sensitivityLabel.textSize = 15f
         sensitivityRow.addView(
             sensitivityLabel,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
@@ -608,17 +624,17 @@ class MainActivity : Activity() {
         sensitivitySeekBar.progress = 100
         sensitivityRow.addView(
             sensitivitySeekBar,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 2.5f
             )
         )
         mainPane.addView(
             sensitivityRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -627,11 +643,11 @@ class MainActivity : Activity() {
         bandwidthRow.gravity = Gravity.CENTER_VERTICAL
 
         bandwidthLabel = TextView(this)
-        bandwidthLabel.text = "Bandwidth: 75 kHz"
+        bandwidthLabel.text = "Frequency span: 75 kHz"
         bandwidthLabel.textSize = 14f
         bandwidthRow.addView(
             bandwidthLabel,
-            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
         )
 
         val bandwidthSeekBar = SeekBar(this)
@@ -642,7 +658,7 @@ class MainActivity : Activity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 val khz = progress.coerceIn(5, 1000)
                 requestedDisplayBandwidthKHz = khz
-                bandwidthLabel.text = "Bandwidth: ${khz} kHz"
+                bandwidthLabel.text = "Frequency span: ${khz} kHz"
                 if (::scopeView.isInitialized) scopeView.setDisplayBandwidthKHz(khz)
                 if (fromUser && running && serialOpen && scopeStarted) {
                     try {
@@ -657,11 +673,11 @@ class MainActivity : Activity() {
         })
         bandwidthRow.addView(
             bandwidthSeekBar,
-            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
         )
         mainPane.addView(
             bandwidthRow,
-            android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         )
 
         val noiseFloorRow = LinearLayout(this)
@@ -673,21 +689,18 @@ class MainActivity : Activity() {
         noiseFloorLabel.textSize = 14f
         noiseFloorRow.addView(
             noiseFloorLabel,
-            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
         )
 
         val noiseFloorSeek = SeekBar(this)
         noiseFloorSeek.min = 0
-        noiseFloorSeek.max = 100
-        noiseFloorSeek.progress = 50
+        noiseFloorSeek.max = 60
+        noiseFloorSeek.progress = 0
         noiseFloorSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val noiseFloor = progress - 50
-                noiseFloorLabel.text =
-                    if (noiseFloor > 0) "Noise floor: +$noiseFloor"
-                    else "Noise floor: $noiseFloor"
+                noiseFloorLabel.text = "Noise floor: $progress"
                 if (::scopeView.isInitialized) {
-                    scopeView.setNoiseFloor(noiseFloor)
+                    scopeView.setNoiseFloor(progress)
                 }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -695,11 +708,11 @@ class MainActivity : Activity() {
         })
         noiseFloorRow.addView(
             noiseFloorSeek,
-            android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f)
         )
         mainPane.addView(
             noiseFloorRow,
-            android.widget.LinearLayout.LayoutParams(android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT)
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         )
 
         // ----------------------------
@@ -714,9 +727,9 @@ class MainActivity : Activity() {
         signalMeterLabel.textSize = 16f
         signalMeterRow.addView(
             signalMeterLabel,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1.2f
             )
         )
@@ -731,7 +744,7 @@ class MainActivity : Activity() {
         signalMeterBar.progressTintList = ColorStateList.valueOf(Color.rgb(0, 190, 0))
         signalMeterRow.addView(
             signalMeterBar,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
                 28,
                 2.8f
@@ -740,9 +753,9 @@ class MainActivity : Activity() {
 
         mainPane.addView(
             signalMeterRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -752,47 +765,9 @@ class MainActivity : Activity() {
         frequencyLabel.textSize = 15f
         mainPane.addView(
             frequencyLabel,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        val frequencyRow = LinearLayout(this)
-        frequencyRow.orientation = LinearLayout.HORIZONTAL
-        frequencyRow.gravity = Gravity.CENTER_VERTICAL
-
-        frequencyEdit = EditText(this)
-        frequencyEdit.setSingleLine(true)
-        frequencyEdit.hint = "Waiting for IC-705 frequency..."
-        frequencyEdit.inputType =
-            InputType.TYPE_CLASS_NUMBER or
-                    InputType.TYPE_NUMBER_FLAG_DECIMAL
-        frequencyRow.addView(
-            frequencyEdit,
-            android.widget.LinearLayout.LayoutParams(
-                0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-                2f
-            )
-        )
-
-        setFrequencyButton = Button(this)
-        setFrequencyButton.text = "SET FREQUENCY"
-        setFrequencyButton.isEnabled = false
-        frequencyRow.addView(
-            setFrequencyButton,
-            android.widget.LinearLayout.LayoutParams(
-                0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
-                1.25f
-            )
-        )
-        mainPane.addView(
-            frequencyRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -818,41 +793,41 @@ class MainActivity : Activity() {
 
         tuningRow.addView(
             down500Button,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         tuningRow.addView(
             up500Button,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         tuningRow.addView(
             down1kButton,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         tuningRow.addView(
             up1kButton,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         mainPane.addView(
             tuningRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -870,25 +845,25 @@ class MainActivity : Activity() {
 
         modeRow.addView(
             usbButton,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         modeRow.addView(
             lsbButton,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         mainPane.addView(
             modeRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -909,12 +884,32 @@ class MainActivity : Activity() {
         addBandButtonRow(
             mainPane,
             listOf(
-                "17m\n18.150" to 18_150_000L,
+                "17m\n18.100" to 18_100_000L,
                 "15m\n21.300" to 21_300_000L,
                 "12m\n24.950" to 24_950_000L,
                 "10m\n28.400" to 28_400_000L
             )
         )
+
+        val qualityRow = LinearLayout(this)
+        qualityRow.orientation = LinearLayout.HORIZONTAL
+        qualityRow.gravity = Gravity.CENTER_VERTICAL
+        qualityRow.setPadding(dp(8), dp(4), dp(8), dp(4))
+        linkQualityLight = View(this)
+        linkQualityLight.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.rgb(110, 110, 110))
+        }
+        qualityRow.addView(linkQualityLight, LinearLayout.LayoutParams(dp(18), dp(18)))
+        linkQualityText = TextView(this)
+        linkQualityText.text = "NETWORK: DISCONNECTED"
+        linkQualityText.textSize = 14f
+        linkQualityText.setPadding(dp(8), 0, 0, 0)
+        qualityRow.addView(linkQualityText)
+        mainPane.addView(qualityRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
 
         val connectionRow = LinearLayout(this)
         connectionRow.orientation = LinearLayout.HORIZONTAL
@@ -922,128 +917,75 @@ class MainActivity : Activity() {
 
         connectButton = Button(this)
         connectButton.text = "CONNECT"
+        connectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(0, 150, 0))
 
         disconnectButton = Button(this)
-        disconnectButton.text = "DISCONNECT"
+        disconnectButton.text = "DISCONNECTED"
         disconnectButton.isEnabled = false
+        disconnectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(110, 110, 110))
 
         connectionRow.addView(
             connectButton,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
         connectionRow.addView(
             disconnectButton,
-            android.widget.LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams(
                 0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
-        // Scrollable page areas. The MAIN / SETTINGS tab bar stays fixed.
-        val mainScroll = ScrollView(this)
-        mainScroll.isFillViewport = true
-        mainScroll.addView(
-            mainPane,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        val networkScroll = ScrollView(this)
-        networkScroll.isFillViewport = true
-        networkScroll.visibility = View.GONE
-        networkScroll.addView(networkPane)
-
-        val settingsScroll = ScrollView(this)
-        settingsScroll.isFillViewport = true
-        settingsScroll.visibility = View.GONE
-        settingsScroll.addView(
-            settingsPane,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        root.addView(
-            mainScroll,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        // Keep CONNECT / DISCONNECT and the MAIN / SETTINGS tabs together.
-        // They stay directly below the main scrolling content instead of
-        // being forced all the way to the bottom of the Samsung display.
-        root.addView(
+        mainPane.addView(
             connectionRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-        root.addView(
-            tabRow,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(56)
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
+        val mainScrollView = ScrollView(this)
+        mainScrollView.isFillViewport = true
+        mainScrollView.addView(
+            mainPane,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
         root.addView(
-            settingsScroll,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            mainScrollView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
                 1f
             )
         )
         root.addView(
-            networkScroll,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            settingsPane,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
                 1f
             )
         )
 
         setContentView(root)
+        applyDarkTheme(root)
+        updateConnectionButtons(connecting = false, isConnected = false)
 
         mainTabButton.setOnClickListener {
-            mainScroll.visibility = View.VISIBLE
-            settingsScroll.visibility = View.GONE
-            networkScroll.visibility = View.GONE
-            connectionRow.visibility = View.VISIBLE
-            mainTabButton.alpha = 1.0f
-            settingsTabButton.alpha = 0.65f
-            networkTabButton.alpha = 0.65f
+            mainPane.visibility = View.VISIBLE
+            settingsPane.visibility = View.GONE
         }
 
         settingsTabButton.setOnClickListener {
-            mainScroll.visibility = View.GONE
-            settingsScroll.visibility = View.VISIBLE
-            networkScroll.visibility = View.GONE
-            connectionRow.visibility = View.GONE
-            mainTabButton.alpha = 0.65f
-            settingsTabButton.alpha = 1.0f
-            networkTabButton.alpha = 0.65f
-        }
-
-        networkTabButton.setOnClickListener {
-            mainScroll.visibility = View.GONE
-            settingsScroll.visibility = View.GONE
-            networkScroll.visibility = View.VISIBLE
-            connectionRow.visibility = View.GONE
-            mainTabButton.alpha = 0.65f
-            settingsTabButton.alpha = 0.65f
-            networkTabButton.alpha = 1.0f
-            refreshNetworkHistoryUi()
+            mainPane.visibility = View.GONE
+            settingsPane.visibility = View.VISIBLE
         }
 
         connectButton.setOnClickListener {
@@ -1063,32 +1005,16 @@ class MainActivity : Activity() {
             setFrequencyFromUi()
         }
         down500Button.setOnClickListener {
-            if (running && serialOpen) {
-                shiftFrequencyBy(-500L, "500 Hz")
-            } else {
-                appendLog("ERROR: Connect to the IC-705 before tuning.")
-            }
+            shiftFrequencyBy(-500L, "500 Hz")
         }
         up500Button.setOnClickListener {
-            if (running && serialOpen) {
-                shiftFrequencyBy(500L, "500 Hz")
-            } else {
-                appendLog("ERROR: Connect to the IC-705 before tuning.")
-            }
+            shiftFrequencyBy(500L, "500 Hz")
         }
         down1kButton.setOnClickListener {
-            if (running && serialOpen) {
-                shiftFrequencyBy(-1000L, "1 kHz")
-            } else {
-                appendLog("ERROR: Connect to the IC-705 before tuning.")
-            }
+            shiftFrequencyBy(-1000L, "1 kHz")
         }
         up1kButton.setOnClickListener {
-            if (running && serialOpen) {
-                shiftFrequencyBy(1000L, "1 kHz")
-            } else {
-                appendLog("ERROR: Connect to the IC-705 before tuning.")
-            }
+            shiftFrequencyBy(1000L, "1 kHz")
         }
         usbButton.setOnClickListener {
             setOperatingModeFromUi(
@@ -1133,56 +1059,47 @@ class MainActivity : Activity() {
         )
 
         scopeView.setSensitivity(1.0f)
-
-        // Dark theme text: keep all button, label, and settings text
-        // readable against the dark background.
-        applyDarkTextColors(root)
-        updateConnectionButtonColors(false)
-        updateNetworkQualityIndicator(0, "BAD")
-
         mainTabButton.performClick()
     }
 
-    private fun applyDarkTextColors(view: View) {
-        when (view) {
-            is Button -> {
-                view.setTextColor(Color.WHITE)
-                view.backgroundTintList = ColorStateList.valueOf(Color.BLACK)
+    private fun applyDarkTheme(root: View) {
+        val background = Color.rgb(16, 20, 24)
+        val surface = Color.rgb(36, 45, 53)
+        val foreground = Color.rgb(238, 243, 246)
+        val secondary = Color.rgb(176, 190, 197)
+        val accent = Color.rgb(64, 196, 255)
+        root.setBackgroundColor(background)
+        window.statusBarColor = background
+        window.navigationBarColor = background
+        window.decorView.systemUiVisibility =
+            window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+
+        fun style(view: View) {
+            when (view) {
+                is Button -> {
+                    view.setTextColor(foreground)
+                    view.backgroundTintList = ColorStateList.valueOf(surface)
+                }
+                is EditText -> {
+                    view.setTextColor(foreground)
+                    view.setHintTextColor(secondary)
+                    view.backgroundTintList = ColorStateList.valueOf(accent)
+                }
+                is TextView -> view.setTextColor(foreground)
+                is SeekBar -> {
+                    view.progressTintList = ColorStateList.valueOf(accent)
+                    view.thumbTintList = ColorStateList.valueOf(accent)
+                }
+                is ProgressBar -> view.progressTintList = ColorStateList.valueOf(accent)
             }
-            is EditText -> {
-                view.setTextColor(Color.WHITE)
-                view.setHintTextColor(Color.LTGRAY)
-            }
-            is TextView -> {
-                view.setTextColor(Color.WHITE)
+            if (view is ViewGroup) {
+                for (index in 0 until view.childCount) style(view.getChildAt(index))
             }
         }
-
-        if (view is android.view.ViewGroup) {
-            for (i in 0 until view.childCount) {
-                applyDarkTextColors(view.getChildAt(i))            }
+        style(root)
+        if (::signalMeterBar.isInitialized) {
+            signalMeterBar.progressTintList = ColorStateList.valueOf(Color.rgb(0, 190, 0))
         }
-    }
-
-    private fun updateConnectionButtonColors(isConnected: Boolean) {
-        if (!::connectButton.isInitialized || !::disconnectButton.isInitialized) return
-
-        if (isConnected) {
-            // Connected: CONNECT becomes green and DISCONNECT becomes red.
-            connectButton.backgroundTintList =
-                ColorStateList.valueOf(Color.rgb(0, 150, 0))
-            disconnectButton.backgroundTintList =
-                ColorStateList.valueOf(Color.rgb(190, 0, 0))
-        } else {
-            // Disconnected: CONNECT becomes red and DISCONNECT returns to black.
-            connectButton.backgroundTintList =
-                ColorStateList.valueOf(Color.rgb(190, 0, 0))
-            disconnectButton.backgroundTintList =
-                ColorStateList.valueOf(Color.BLACK)
-        }
-
-        connectButton.setTextColor(Color.WHITE)
-        disconnectButton.setTextColor(Color.WHITE)
     }
 
     private fun addBandButtonRow(
@@ -1198,31 +1115,15 @@ class MainActivity : Activity() {
             button.text = label
             button.isEnabled = false
             button.setOnClickListener {
-                // Update the app's working frequency immediately when a band
-                // button is pressed. This lets the 500 Hz / 1 kHz tuning
-                // buttons use the new band immediately, without requiring
-                // another manual SET FREQUENCY press.
-                frequencyHz = hz
-
                 frequencyEdit.setText(hz.toString())
-
-                if (::frequencyLabelView.isInitialized) {
-                    frequencyLabelView.text =
-                        "Frequency: ${formatFrequency(hz)}"
-                }
-
-                if (::scopeView.isInitialized) {
-                    scopeView.centerFrequencyHz = hz
-                }
-
-                setFrequencyFromUi()
+                tuneFrequencyTo(hz, label.replace('\n', ' '))
             }
 
             row.addView(
                 button,
-                android.widget.LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams(
                     0,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
                     1f
                 )
             )
@@ -1230,9 +1131,9 @@ class MainActivity : Activity() {
 
         parent.addView(
             row,
-            android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -1269,21 +1170,72 @@ class MainActivity : Activity() {
             .apply()
     }
 
-    private fun startSession() {
+    private fun updateConnectionButtons(connecting: Boolean, isConnected: Boolean) {
+        runOnUiThread {
+            if (connecting) {
+                connectButton.text = "CONNECTING..."
+                connectButton.isEnabled = false
+                connectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(210, 160, 0))
+                disconnectButton.text = "CANCEL / DISCONNECT"
+                disconnectButton.isEnabled = true
+                disconnectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(170, 40, 40))
+            } else if (isConnected) {
+                connectButton.text = "CONNECTED ✓"
+                connectButton.isEnabled = false
+                connectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(0, 150, 0))
+                disconnectButton.text = "DISCONNECT"
+                disconnectButton.isEnabled = true
+                disconnectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(190, 35, 35))
+            } else {
+                connectButton.text = "CONNECT"
+                connectButton.isEnabled = true
+                connectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(0, 150, 0))
+                disconnectButton.text = "DISCONNECTED"
+                disconnectButton.isEnabled = false
+                disconnectButton.backgroundTintList = ColorStateList.valueOf(Color.rgb(110, 110, 110))
+            }
+        }
+    }
+
+    private fun updateLinkQuality(audioAgeMs: Long, scopeAgeMs: Long) {
+        if (!::linkQualityLight.isInitialized || !::linkQualityText.isInitialized) return
+        val (label, color) = when {
+            !running -> "DISCONNECTED" to Color.rgb(110, 110, 110)
+            !connected -> "CONNECTING" to Color.rgb(220, 175, 0)
+            audioRunning && scopeStarted && audioAgeMs <= 500L && scopeAgeMs <= 500L ->
+                "GOOD" to Color.rgb(0, 190, 0)
+            audioAgeMs <= 1500L && scopeAgeMs <= 1500L ->
+                "FAIR" to Color.rgb(230, 175, 0)
+            else -> "POOR" to Color.rgb(220, 35, 35)
+        }
+        if (label == lastLinkQualityLabel) return
+        lastLinkQualityLabel = label
+        runOnUiThread {
+            if (::linkQualityLight.isInitialized) {
+                linkQualityLight.background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(color)
+                }
+            }
+            if (::linkQualityText.isInitialized) linkQualityText.text = "NETWORK: $label"
+        }
+    }
+
+    private fun startSession(preserveScreen: Boolean = false) {
         if (running) {
             appendLog("Session already running.")
             return
         }
-        val radioIp =
+        val radioIp = if (preserveScreen) activeRadioIp else
             settingsIpEdit.text.toString().trim()
 
-        val username =
+        val username = if (preserveScreen) activeUsername else
             settingsUsernameEdit.text.toString().trim()
 
-        val password =
+        val password = if (preserveScreen) activePassword else
             settingsPasswordEdit.text.toString()
 
-        saveNetworkSettings()
+        if (!preserveScreen) saveNetworkSettings()
         if (radioIp.isEmpty()) {
             appendLog("ERROR: Enter the IC-705 IP address.")
             return
@@ -1296,12 +1248,22 @@ class MainActivity : Activity() {
             appendLog("ERROR: Enter the network password.")
             return
         }
-        clearLog()
+        activeRadioIp = radioIp
+        activeUsername = username
+        activePassword = password
+        audioStreamExpected = false
+        audioStreamExpectedSinceAtMs = 0L
+        audioRecoveryNotBeforeMs = 0L
+        audioRecoveryGuard.set(false)
+        autoSidebandChangePending = false
+        if (!preserveScreen) clearLog()
+        appendLog("App version: $APP_VERSION")
         running = true
+        streamDiagnosticHandler.removeCallbacks(streamStallWatchdog)
+        streamDiagnosticHandler.postDelayed(streamStallWatchdog, 250L)
+        streamDiagnosticHandler.removeCallbacks(streamDiagnosticTask)
+        streamDiagnosticHandler.postDelayed(streamDiagnosticTask, 5000L)
         connected = false
-        clearNetworkHistory()
-        fullSessionRecoveryInProgress = false
-        lastFullSessionRecoveryAt = 0L
         authOk = false
         gotA8 = false
         connInfoOk = false
@@ -1317,10 +1279,19 @@ class MainActivity : Activity() {
         serialCivSequence = 1
         serialOpen = false
         audioRunning = false
+        resetReceiveSequenceState(audioReceiveSequenceState)
+        resetReceiveSequenceState(serialReceiveSequenceState)
         audioHaveSequence = false
         audioLastSequence = 0
         audioPacketCount = 0L
         audioDebugPacketCount = 0
+        audioWriteCalls = 0L
+        audioWriteBytes = 0L
+        audioWriteErrors = 0L
+        audioLastPacketAtMs = 0L
+        audioStreamExpectedSinceAtMs = 0L
+        audioRecoveryNotBeforeMs = 0L
+        audioLastWriteAtMs = 0L
         frequencyReceived = false
         frequencyWriteResponseReceived = false
         frequencyWriteRejected = false
@@ -1330,28 +1301,31 @@ class MainActivity : Activity() {
         scopeCivFrames = 0L
         scopeRaw27Frames = 0L
         scopeDecodedFrames = 0L
+        scopeLastTransportAtMs = 0L
+        scopeLastRawFrameAtMs = 0L
+        scopeLastDecodedAtMs = 0L
         scopePollCount = 0L
         scopeAwaitingResponse = false
         scopeLastUdpBytes = 0
         scopeLastCivBytes = 0
         scopeAwaitingResponse = false
+        scopeStarted = false
         stopScopePolling()
         resetScopeAssembly()
-        if (::scopeView.isInitialized) {
+        if (!preserveScreen && ::scopeView.isInitialized) {
             scopeView.clearScope()
             scopeView.visibility = View.GONE
         }
-        if (::sensitivityRow.isInitialized) {
+        if (!preserveScreen && ::sensitivityRow.isInitialized) {
             sensitivityRow.visibility = View.GONE
         }
         activeModeCode = -1
         modeReceived = false
         trackedPackets.clear()
         serialTrackedPackets.clear()
-        connectButton.isEnabled = false
-        disconnectButton.isEnabled = true
-        setFrequencyButton.isEnabled = false
-        if (::scopeToggleButton.isInitialized) {
+        if (!preserveScreen) updateConnectionButtons(connecting = true, isConnected = false)
+        if (!preserveScreen) setFrequencyButton.isEnabled = false
+        if (!preserveScreen && ::scopeToggleButton.isInitialized) {
             scopeToggleButton.isEnabled = false
             scopeToggleButton.text = "SPECTRUM ON"
             if (::scopeView.isInitialized) {
@@ -1361,21 +1335,21 @@ class MainActivity : Activity() {
                 sensitivityRow.visibility = View.GONE
             }
         }
-        enableBandButtons(false)
+        if (!preserveScreen) enableBandButtons(false)
         sessionThread = Thread {
             try {
-                runSession(radioIp, username, password)
+                runSession(radioIp, username, password, preserveScreen)
             } catch (e: Exception) {
                 appendLog("SESSION ERROR: ${e.message}")
                 try {
-                    stopSession()
+                    stopSession(preserveScreen)
                 } catch (disconnectError: Exception) {
                     appendLog("DISCONNECT ERROR: ${disconnectError.message}")
-                    cleanupSocketOnly()
+                    cleanupSocketOnly(preserveScreen)
                 }
             } finally {
                 if (!connected && running) {
-                    cleanupSocketOnly()
+                    cleanupSocketOnly(preserveScreen)
                 }
             }
         }
@@ -1384,7 +1358,8 @@ class MainActivity : Activity() {
     private fun runSession(
         radioIp: String,
         username: String,
-        password: String
+        password: String,
+        preserveScreen: Boolean = false
     ) {
         appendLog("================================")
         appendLog("IC-705 REMOTE CONNECTION")
@@ -1538,19 +1513,28 @@ class MainActivity : Activity() {
         sendCivReadFrequency()
         val frequencyDeadline =
             System.currentTimeMillis() + 5000L
+        var nextFrequencyRetryAt =
+            System.currentTimeMillis() + 1000L
         while (
             running &&
             !frequencyReceived &&
             System.currentTimeMillis() < frequencyDeadline
         ) {
+            val now = System.currentTimeMillis()
+            if (now >= nextFrequencyRetryAt && !frequencyReceived) {
+                appendLog("CI-V frequency response not received yet; retrying read.")
+                sendCivReadFrequency()
+                nextFrequencyRetryAt = now + 1000L
+            }
             Thread.sleep(50)
         }
         if (!frequencyReceived) {
             throw Exception("CI-V frequency response was not received.")
         }
         connected = true
-        startNetworkWatchdog()
+        automaticReconnectAttempts = 0
         runOnUiThread {
+            if (!preserveScreen) updateConnectionButtons(connecting = false, isConnected = true)
             setFrequencyButton.isEnabled = true
             down500Button.isEnabled = true
             up500Button.isEnabled = true
@@ -1560,13 +1544,14 @@ class MainActivity : Activity() {
             lsbButton.isEnabled = true
             enableBandButtons(true)
             scopeToggleButton.isEnabled = true
-            scopeToggleButton.text = "SPECTRUM ON"
-            scopeView.visibility = View.GONE
-            sensitivityRow.visibility = View.GONE
-            signalMeterLabel.text = "Signal: S0 (0)"
-            signalMeterBar.progress = 0
-            signalMeterBar.progressTintList = ColorStateList.valueOf(Color.rgb(0, 190, 0))
-            updateConnectionButtonColors(true)
+            if (!preserveScreen) {
+                scopeToggleButton.text = "SPECTRUM ON"
+                scopeView.visibility = View.GONE
+                sensitivityRow.visibility = View.GONE
+                signalMeterLabel.text = "Signal: S0 (0)"
+                signalMeterBar.progress = 0
+                signalMeterBar.progressTintList = ColorStateList.valueOf(Color.rgb(0, 190, 0))
+            }
         }
         startSignalMeterPolling()
         appendLog("")
@@ -1574,6 +1559,7 @@ class MainActivity : Activity() {
         appendLog("CI-V FREQUENCY READ SUCCESS")
         appendLog("================================")
         appendLog("Frequency: ${formatFrequency(frequencyHz)}")
+        applyAutomaticSideband(frequencyHz)
 
         runOnUiThread {
             frequencyEdit.setText(
@@ -1586,40 +1572,24 @@ class MainActivity : Activity() {
         appendLog("Control + serial/CI-V session is established.")
         appendLog("Initial IC-705 frequency loaded into SET FREQUENCY field.")
 
-        // Restore the previously verified IC-705 RX audio path.
-        // Audio is independent UDP 50003 and is started once after the
-        // initial frequency read. Repeated band changes reuse this stream.
-        audioExpected = true
-        lastAudioPcmAt = System.currentTimeMillis()
-        audioRecoveryAttempt = 0
-        audioRecoveryPausedUntilAt = 0L
+        // Establish audio first, matching the working attached spectrum app.
+        // Start the scope only after the audio handshake has finished.
+        audioStreamExpected = true
+        audioStreamExpectedSinceAtMs = System.currentTimeMillis()
+        audioRecoveryGuard.set(true)
         try {
             openAudioReceive(radioIp)
         } catch (e: Exception) {
-            appendLog("AUDIO START FAILED: ${e.message}")
+            appendLog("AUDIO START FAILED: ${e.message}; quick stream recovery will retry.")
+        } finally {
+            audioRecoveryGuard.set(false)
         }
 
-        // Start the IC-705 spectrum automatically after the control,
-        // serial/CI-V, and audio paths are established.
-        //
-        // startSpectrumScope() sends the verified six-command SPECTRUM ON
-        // sequence:
-        //   27 10 01
-        //   27 11 01
-        //   27 12 00
-        //   27 13 00
-        //   27 14 00 00
-        //   27 15 00 <half-span>
-        //
-        // No 27 00 polling is used. The IC-705 sends 27 00 scope frames
-        // automatically after the scope is enabled.
+        appendLog("Starting Spectrum automatically in CENTER mode after audio setup.")
         try {
             startSpectrumScope()
         } catch (e: Exception) {
             appendLog("SPECTRUM AUTO-START FAILED: ${e.message}")
-            updateScopeInfo(
-                "Spectrum: automatic start failed — press SPECTRUM ON"
-            )
         }
 
         while (running) {
@@ -1633,6 +1603,7 @@ class MainActivity : Activity() {
         socket.connect(InetSocketAddress(radioIp, SERIAL_PORT))
         socket.soTimeout = SOCKET_TIMEOUT_MS
         serialSocket = socket
+        resetReceiveSequenceState(serialReceiveSequenceState)
         val localAddressBytes = socket.localAddress.address
         if (localAddressBytes.size < 4) {
             throw Exception("Could not determine local IPv4 address for serial stream.")
@@ -1917,113 +1888,64 @@ class MainActivity : Activity() {
             return
         }
 
-        // Fast tuning: do not wait for a CI-V readback or ACK before updating
-        // the Android UI. The serial receiver continues to process the radio
-        // response asynchronously. This makes the 500 Hz / 1 kHz buttons feel
-        // like a real tuning control instead of a request/verify operation.
-        frequencyHz = newHz
-
-        runOnUiThread {
-            frequencyEdit.setText(newHz.toString())
-            frequencyLabelView.text = "Frequency: ${formatFrequency(newHz)}"
-            if (::scopeView.isInitialized) {
-                scopeView.centerFrequencyHz = newHz
-            }
-            setFrequencyButton.isEnabled = false
-            down500Button.isEnabled = false
-            up500Button.isEnabled = false
-            down1kButton.isEnabled = false
-            up1kButton.isEnabled = false
+        if (frequencyTuneBusy) {
+            appendLog("$stepLabel TUNE IGNORED: previous tune is still being confirmed")
+            return
         }
-
-        appendLog("$stepLabel TUNE: ${formatFrequency(currentHz)} -> ${formatFrequency(newHz)}")
+        frequencyTuneBusy = true
+        runOnUiThread { setTuneControlsEnabled(false) }
+        appendLog("$stepLabel TUNE REQUEST: ${formatFrequency(currentHz)} -> ${formatFrequency(newHz)}")
 
         Thread {
             try {
                 frequencyWriteResponseReceived = false
                 frequencyWriteRejected = false
                 sendCivSetFrequency(newHz)
-                appendLog("$stepLabel TUNE SENT: ${formatFrequency(newHz)}")
+                appendLog("$stepLabel CI-V frequency-set command sent: ${formatFrequency(newHz)}")
+                val ackDeadline = System.currentTimeMillis() + 1000L
+                while (running && !frequencyWriteResponseReceived && !frequencyWriteRejected &&
+                    System.currentTimeMillis() < ackDeadline) Thread.sleep(25L)
 
-                // Only a short UI lockout prevents accidental double taps.
-                // Do not wait seconds for radio verification.
-                Thread.sleep(100)
-            } catch (e: Exception) {
-                if (running) {
-                    appendLog("$stepLabel TUNE ERROR: ${e.message}")
-                }
-            } finally {
-                if (running) {
-                    runOnUiThread {
-                        setFrequencyButton.isEnabled = true
-                        down500Button.isEnabled = true
-                        up500Button.isEnabled = true
-                        down1kButton.isEnabled = true
-                        up1kButton.isEnabled = true
+                if (frequencyWriteRejected) {
+                    appendLog("$stepLabel TUNE REJECTED by IC-705")
+                } else {
+                    frequencyReceived = false
+                    sendCivReadFrequency()
+                    val readDeadline = System.currentTimeMillis() + 1200L
+                    while (running && !frequencyReceived && System.currentTimeMillis() < readDeadline) Thread.sleep(25L)
+                    if (frequencyReceived) {
+                        val actualHz = frequencyHz
+                        appendLog(if (actualHz == newHz) {
+                            "$stepLabel TUNE VERIFIED: ${formatFrequency(actualHz)}"
+                        } else {
+                            "$stepLabel TUNE MISMATCH: requested ${formatFrequency(newHz)}, radio reports ${formatFrequency(actualHz)}"
+                        })
+                        runOnUiThread {
+                            frequencyEdit.setText(actualHz.toString())
+                            frequencyLabelView.text = "Frequency: ${formatFrequency(actualHz)}"
+                            if (::scopeView.isInitialized) scopeView.centerFrequencyHz = actualHz
+                        }
+                    } else {
+                        appendLog("$stepLabel TUNE UNCONFIRMED: no frequency readback; UI left at radio's last reported frequency")
                     }
                 }
+            } catch (e: Exception) {
+                if (running) appendLog("$stepLabel TUNE ERROR: ${e.message}")
+            } finally {
+                frequencyTuneBusy = false
+                if (running) runOnUiThread { setTuneControlsEnabled(true) }
             }
         }.start()
     }
 
-    private fun setFrequencyFromSpectrum(targetHz: Long) {
-        if (!running || !serialOpen) {
-            appendLog("SPECTRUM TUNE: CI-V serial stream is not open.")
-            return
-        }
+    @Volatile private var frequencyTuneBusy = false
 
-        val roundedHz = ((targetHz + 500L) / 1000L) * 1000L
-        if (roundedHz < 1_000L || roundedHz > 9_999_999_999L) {
-            appendLog("SPECTRUM TUNE: frequency outside supported range.")
-            return
-        }
-
-        val previousHz = frequencyHz
-        frequencyHz = roundedHz
-
-        runOnUiThread {
-            frequencyEdit.setText(roundedHz.toString())
-            frequencyLabelView.text = "Frequency: ${formatFrequency(roundedHz)}"
-            if (::scopeView.isInitialized) {
-                scopeView.centerFrequencyHz = roundedHz
-            }
-            setFrequencyButton.isEnabled = false
-            down500Button.isEnabled = false
-            up500Button.isEnabled = false
-            down1kButton.isEnabled = false
-            up1kButton.isEnabled = false
-        }
-
-        appendLog(
-            "SPECTRUM TOUCH TUNE: ${formatFrequency(previousHz)} -> " +
-                    "${formatFrequency(roundedHz)}"
-        )
-
-        Thread {
-            try {
-                frequencyWriteResponseReceived = false
-                frequencyWriteRejected = false
-                sendCivSetFrequency(roundedHz)
-                appendLog(
-                    "SPECTRUM TOUCH TUNE SENT: ${formatFrequency(roundedHz)}"
-                )
-                Thread.sleep(100)
-            } catch (e: Exception) {
-                if (running) {
-                    appendLog("SPECTRUM TOUCH TUNE ERROR: ${e.message}")
-                }
-            } finally {
-                if (running) {
-                    runOnUiThread {
-                        setFrequencyButton.isEnabled = true
-                        down500Button.isEnabled = true
-                        up500Button.isEnabled = true
-                        down1kButton.isEnabled = true
-                        up1kButton.isEnabled = true
-                    }
-                }
-            }
-        }.start()
+    private fun setTuneControlsEnabled(enabled: Boolean) {
+        setFrequencyButton.isEnabled = enabled && running && serialOpen
+        down500Button.isEnabled = enabled && running && serialOpen
+        up500Button.isEnabled = enabled && running && serialOpen
+        down1kButton.isEnabled = enabled && running && serialOpen
+        up1kButton.isEnabled = enabled && running && serialOpen
     }
 
     private fun setFrequencyFromUi() {
@@ -2044,35 +1966,67 @@ class MainActivity : Activity() {
             appendLog("ERROR: Frequency is outside the supported range.")
             return
         }
+        tuneFrequencyTo(hz, "Manual frequency")
+    }
 
-        runOnUiThread { setFrequencyButton.isEnabled = false }
-        frequencyWriteResponseReceived = false
-        frequencyWriteRejected = false
-
+    private fun tuneFrequencyTo(targetHz: Long, sourceLabel: String) {
+        if (!running || !serialOpen) {
+            appendLog("$sourceLabel: CI-V serial stream is not open.")
+            return
+        }
+        if (targetHz < 1_000L || targetHz > 9_999_999_999L) {
+            appendLog("$sourceLabel: requested frequency is outside the supported range.")
+            return
+        }
+        if (frequencyTuneBusy) {
+            appendLog("$sourceLabel: previous frequency change is still in progress; tap again shortly.")
+            return
+        }
+        frequencyTuneBusy = true
+        runOnUiThread {
+            setTuneControlsEnabled(false)
+            enableBandButtons(false)
+        }
+        appendLog("$sourceLabel SELECTED: requesting ${formatFrequency(targetHz)}")
         Thread {
             try {
-                sendCivSetFrequency(hz)
-                val deadline = System.currentTimeMillis() + FREQUENCY_TIMEOUT_MS
-                while (running && !frequencyWriteResponseReceived && !frequencyWriteRejected && System.currentTimeMillis() < deadline) Thread.sleep(50)
+                frequencyWriteResponseReceived = false
+                frequencyWriteRejected = false
+                sendCivSetFrequency(targetHz)
+                val ackDeadline = System.currentTimeMillis() + 1500L
+                while (running && !frequencyWriteResponseReceived && !frequencyWriteRejected &&
+                    System.currentTimeMillis() < ackDeadline) Thread.sleep(25L)
                 if (!running) return@Thread
                 if (frequencyWriteRejected) {
-                    appendLog("FREQUENCY WRITE REJECTED: IC-705 returned CI-V NAK. Connection left open.")
+                    appendLog("$sourceLabel REJECTED: IC-705 returned CI-V NAK.")
                     return@Thread
                 }
                 if (!frequencyWriteResponseReceived) {
-                    appendLog("FREQUENCY WRITE: ACK delayed/not seen. Connection left open.")
+                    appendLog("$sourceLabel: no CI-V ACK received; checking the radio frequency readback anyway.")
+                }
+                frequencyReceived = false
+                sendCivReadFrequency()
+                val readDeadline = System.currentTimeMillis() + 1500L
+                while (running && !frequencyReceived && System.currentTimeMillis() < readDeadline) Thread.sleep(25L)
+                if (!running) return@Thread
+                if (!frequencyReceived) {
+                    appendLog("$sourceLabel NOT CONFIRMED: IC-705 frequency readback timed out.")
                     return@Thread
                 }
-                frequencyHz = hz
-                runOnUiThread {
-                    frequencyEdit.setText(hz.toString())
-                    if (::scopeView.isInitialized) scopeView.centerFrequencyHz = hz
+                val actualHz = frequencyHz
+                if (actualHz == targetHz) {
+                    appendLog("$sourceLabel CONFIRMED: radio is tuned to ${formatFrequency(actualHz)}.")
+                } else {
+                    appendLog("$sourceLabel MISMATCH: requested ${formatFrequency(targetHz)}, radio reports ${formatFrequency(actualHz)}.")
                 }
-                appendLog("FREQUENCY WRITE VERIFIED BY CI-V ACK: ${formatFrequency(hz)}")
             } catch (e: Exception) {
-                if (running) appendLog("FREQUENCY WRITE ERROR: ${e.message}")
+                if (running) appendLog("$sourceLabel ERROR: ${e.message}")
             } finally {
-                if (running) runOnUiThread { setFrequencyButton.isEnabled = true }
+                frequencyTuneBusy = false
+                if (running) runOnUiThread {
+                    setTuneControlsEnabled(true)
+                    enableBandButtons(true)
+                }
             }
         }.start()
     }
@@ -2126,7 +2080,8 @@ class MainActivity : Activity() {
     }
 
     private fun openAudioReceive(
-        radioIp: String
+        radioIp: String,
+        fastRecovery: Boolean = false
     ) {
         if (!running) {
             throw Exception("Session is not running.")
@@ -2139,12 +2094,10 @@ class MainActivity : Activity() {
 
         val socket = DatagramSocket(null)
         socket.reuseAddress = true
-        // v27.7: use an ephemeral local UDP source port for audio.
-        // The IC-705 audio server remains on remote port 50003.
         socket.bind(
             InetSocketAddress(
                 "0.0.0.0",
-                0
+                AUDIO_PORT
             )
         )
         socket.connect(
@@ -2156,11 +2109,7 @@ class MainActivity : Activity() {
         socket.soTimeout = SOCKET_TIMEOUT_MS
 
         audioSocket = socket
-        audioLocalPort = socket.localPort
-        lastAudioRxAt = 0L
-        audioRxPacketCount = 0L
-        audioPcmPacketCount = 0L
-        audioPkt7RxCount = 0L
+        resetReceiveSequenceState(audioReceiveSequenceState)
 
         appendLog(
             "Audio socket local port: ${socket.localPort}"
@@ -2186,7 +2135,7 @@ class MainActivity : Activity() {
 
         audioLocalSid =
             (audioLocalSid shl 16) or
-                    (socket.localPort and 0xFFFF)
+                    (AUDIO_PORT and 0xFFFF)
 
         appendLog(
             "Audio local IPv4: " +
@@ -2200,7 +2149,7 @@ class MainActivity : Activity() {
         appendLog("================================")
         appendLog("IC-705 RECEIVE AUDIO")
         appendLog("================================")
-        appendLog("Audio UDP local port: ${socket.localPort}")
+        appendLog("Audio UDP local port: $AUDIO_PORT")
         appendLog(
             "Audio local SID: ${intToHex(audioLocalSid)}"
         )
@@ -2218,7 +2167,7 @@ class MainActivity : Activity() {
         )
         sendAudioRaw(audioPkt3)
 
-        Thread.sleep(50)
+        Thread.sleep(if (fastRecovery) 10L else 50L)
 
         recordAudioPacket(
             "TX",
@@ -2230,11 +2179,12 @@ class MainActivity : Activity() {
         val pkt4 =
             receiveAudioExpected(
                 expectedLength = 16,
-                timeoutMs = 3000
+                timeoutMs = if (fastRecovery) 800 else 3000
             ) {
                 it.size >= 16 &&
                         (it[0].toInt() and 0xFF) == 0x10 &&
-                        (it[4].toInt() and 0xFF) == 0x04 &&                        (it[5].toInt() and 0xFF) == 0x00
+                        (it[4].toInt() and 0xFF) == 0x04 &&
+                        (it[5].toInt() and 0xFF) == 0x00
             }
 
         if (pkt4 == null) {
@@ -2271,7 +2221,7 @@ class MainActivity : Activity() {
         )
         sendAudioRaw(audioPkt6)
 
-        Thread.sleep(50)
+        Thread.sleep(if (fastRecovery) 10L else 50L)
 
         recordAudioPacket(
             "TX",
@@ -2285,7 +2235,7 @@ class MainActivity : Activity() {
         )
 
         val pkt6 =
-            waitForAudioPkt6Response(5000)
+            waitForAudioPkt6Response(if (fastRecovery) 1000 else 5000)
 
         if (pkt6 == null) {
             throw Exception(
@@ -2308,7 +2258,6 @@ class MainActivity : Activity() {
         audioLastSequence = 0
         audioPacketCount = 0
         audioDebugPacketCount = 0
-
         audioRunning = true
 
         startAudioReceiverThread()
@@ -2435,8 +2384,6 @@ class MainActivity : Activity() {
                     )
 
                 socket.receive(packet)
-                lastAudioPacketAt = System.currentTimeMillis()
-                networkWarningLogged = false
 
                 val data =
                     packet.data.copyOf(
@@ -2448,14 +2395,18 @@ class MainActivity : Activity() {
             } catch (
                 _: java.net.SocketTimeoutException
             ) {
+                // Normal. Lets the loop notice shutdown.
             } catch (e: Exception) {
-                if (running && audioRunning) {
-                    appendLog("AUDIO RECEIVE ERROR: ${e.message}")
-                    if (!socket.isClosed) {
-                        try { Thread.sleep(50) } catch (_: InterruptedException) {}
-                        continue
-                    }
+                if (
+                    running &&
+                    audioRunning
+                ) {
+                    appendLog(
+                        "AUDIO RECEIVE ERROR: ${e.message}"
+                    )
+                    beginAudioStreamRecovery("audio receive error: ${e.message}")
                 }
+
                 break
             }
         }
@@ -2464,17 +2415,12 @@ class MainActivity : Activity() {
     private fun processAudioPacket(
         data: ByteArray
     ) {
-        lastAudioRxAt = System.currentTimeMillis()
-        audioRxPacketCount++
-
         // Radio ping packets are handled here too.
         if (
             data.size == 21 &&
             (data[4].toInt() and 0xFF) == 0x07 &&
             (data[5].toInt() and 0xFF) == 0x00
         ) {
-            audioPkt7RxCount++
-
             val direction =
                 data[16].toInt() and 0xFF
 
@@ -2550,6 +2496,8 @@ class MainActivity : Activity() {
                 6
             )
 
+        noteIncomingSequence(audioReceiveSequenceState, sequence)
+
         // Drop duplicate/out-of-order packets.
         // For a first pass we prioritize getting clean audio through
         // before adding the full retransmission/jitter-buffer layer.
@@ -2575,19 +2523,6 @@ class MainActivity : Activity() {
                 return
             }
         }
-
-        // Count only real PCM audio as healthy audio. PKT7 keepalives
-        // do not reset the audio-quality timer.
-        lastAudioPcmAt = System.currentTimeMillis()
-        audioPcmPacketCount++
-                if (audioRecoveryWaitingForPcm) {
-                    audioRecoveryWaitingForPcm = false
-                    audioRecoveryWaitUntilAt = 0L
-                    audioRecoveryAttempt = 0
-                    audioRecoveryPausedUntilAt = 0L
-                    appendLog("AUDIO RECOVERY: PCM RESTORED")
-                    addNetworkEvent("AUDIO RECOVERY: PCM RESTORED")
-                }
 
         audioHaveSequence = true
         audioLastSequence = sequence
@@ -2616,6 +2551,8 @@ class MainActivity : Activity() {
         }
 
         audioPacketCount++
+        audioLastPacketAtMs = System.currentTimeMillis()
+        audioRecoveryNotBeforeMs = 0L
 
         val track =
             audioTrack
@@ -2629,6 +2566,9 @@ class MainActivity : Activity() {
                     pcm.size,
                     AudioTrack.WRITE_BLOCKING
                 )
+            audioWriteCalls++
+            audioLastWriteAtMs = System.currentTimeMillis()
+            if (written > 0) audioWriteBytes += written.toLong()
 
             if (audioPacketCount <= 3L) {
                 appendLog(
@@ -2646,16 +2586,12 @@ class MainActivity : Activity() {
                 )
             }
         } catch (e: Exception) {
+            audioWriteErrors++
             if (running && audioRunning) {
                 appendLog(
                     "AUDIO PLAYBACK ERROR: ${e.message}"
                 )
-                addNetworkEvent(
-                    "AUDIO PLAYBACK ERROR: ${e.message}"
-                )
-                // Keep control/CI-V alive. The watchdog performs local
-                // audio-stream recovery instead of tearing down the session.
-                audioRunning = false
+                beginAudioStreamRecovery("audio playback error: ${e.message}")
             }
         }
     }
@@ -2929,26 +2865,7 @@ class MainActivity : Activity() {
                     (data[1].toInt() and 0xFF) == 0x00 &&
                     (data[2].toInt() and 0xFF) == 0x00 &&
                     (data[3].toInt() and 0xFF) == 0x00 &&
-                    (data[4].toInt() and 0xFF) == 0x07 &&
-                    (data[5].toInt() and 0xFF) == 0x00 &&
-                    (data[16].toInt() and 0xFF) == 0x00
-                ) {
-                    val reply =
-                        buildAudioPkt7Reply(
-                            readLeShort(
-                                data,
-                                6
-                            ),
-                            data.copyOfRange(
-                                17,
-                                21
-                            )
-                        )
-
-                    recordAudioPacket(
-                        "TX",
-                        "PKT7 REPLY DURING PKT6 WAIT",
-                        reply
+                    (data[4].toInt() a…177 tokens truncated…        reply
                     )
 
                     sendAudioRaw(reply)
@@ -3064,6 +2981,117 @@ class MainActivity : Activity() {
         return null
     }
 
+    private fun beginAudioStreamRecovery(reason: String) {
+        if (!running || !connected || !audioStreamExpected) return
+        if (!audioRecoveryGuard.compareAndSet(false, true)) return
+        audioRecoveryNotBeforeMs = System.currentTimeMillis() + AUDIO_RECOVERY_RETRY_COOLDOWN_MS
+        appendLog("AUDIO RECOVERY: $reason; restarting UDP audio only, keeping radio control and spectrum session alive.")
+        Thread {
+            var recovered = false
+            try {
+                audioRunning = false
+                audioScheduler?.shutdownNow()
+                audioScheduler = null
+                val oldSocket = audioSocket
+                if (oldSocket != null && !oldSocket.isClosed && audioLocalSid != 0 && audioRemoteSid != 0) {
+                    try {
+                        val disconnect = ByteArray(16)
+                        disconnect[0] = 0x10
+                        disconnect[4] = 0x05
+                        writeBeInt(disconnect, 8, audioLocalSid)
+                        writeBeInt(disconnect, 12, audioRemoteSid)
+                        oldSocket.send(DatagramPacket(disconnect, disconnect.size))
+                    } catch (_: Exception) { }
+                }
+                try { oldSocket?.close() } catch (_: Exception) { }
+                audioSocket = null
+                try { audioReceiverThread?.join(200L) } catch (_: InterruptedException) { }
+                audioReceiverThread = null
+                try { audioTrack?.pause() } catch (_: Exception) { }
+                try { audioTrack?.flush() } catch (_: Exception) { }
+                try { audioTrack?.stop() } catch (_: Exception) { }
+                try { audioTrack?.release() } catch (_: Exception) { }
+                audioTrack = null
+                audioHaveSequence = false
+                resetReceiveSequenceState(audioReceiveSequenceState)
+                if (!running) return@Thread
+                openAudioReceive(activeRadioIp, fastRecovery = true)
+                recovered = audioRunning
+                if (recovered) appendLog("AUDIO RECOVERY: audio stream re-established without disconnecting the radio control session.")
+            } catch (e: Exception) {
+                if (running) appendLog("AUDIO RECOVERY: quick restart failed: ${e.message}; another audio-only retry will follow.")
+            } finally {
+                if (!recovered) {
+                    audioRunning = false
+                    try { audioSocket?.close() } catch (_: Exception) { }
+                    audioSocket = null
+                    try { audioTrack?.release() } catch (_: Exception) { }
+                    audioTrack = null
+                }
+                audioRecoveryGuard.set(false)
+            }
+        }.apply {
+            name = "IC705-Audio-Recovery"
+            isDaemon = true
+            start()
+        }
+    }
+
+    // Recreate the UDP session when Android invalidates its active Wi-Fi route.
+    private fun handleUdpSendFailure(stream: String, error: Exception) {
+        if (!running) return
+        val detail = error.message.orEmpty()
+        if (!detail.contains("EPERM", ignoreCase = true) &&
+            !detail.contains("Operation not permitted", ignoreCase = true)
+        ) return
+        if (stream.equals("audio", ignoreCase = true)) {
+            beginAudioStreamRecovery("Android blocked audio UDP send (EPERM)")
+            return
+        }
+        beginNetworkRecovery("Android blocked $stream UDP send (EPERM)")
+    }
+
+    private fun beginNetworkRecovery(reason: String) {
+        if (!running) return
+        if (!udpRecoveryGuard.compareAndSet(false, true)) return
+
+        automaticReconnectRestoreScope = scopeStarted
+        appendLog(
+            "NETWORK RECOVERY: $reason; stall threshold=${STREAM_STALL_TIMEOUT_MS} ms, " +
+                    "reconnect pause=${NETWORK_RECONNECT_DELAY_MS} ms; releasing the old radio session."
+        )
+        running = false
+        Thread({
+            try {
+                stopSession(preserveScreen = true)
+            } catch (e: Exception) {
+                appendLog("NETWORK RECOVERY: cleanup warning: ${e.message}")
+            }
+
+            if (automaticReconnectAttempts >= MAX_AUTO_RECONNECT_ATTEMPTS) {
+                appendLog("NETWORK RECOVERY: stopped after $MAX_AUTO_RECONNECT_ATTEMPTS attempts. Restore Wi-Fi, then press CONNECT.")
+                udpRecoveryGuard.set(false)
+                return@Thread
+            }
+
+            automaticReconnectAttempts++
+            val attempt = automaticReconnectAttempts
+            try {
+                Thread.sleep(NETWORK_RECONNECT_DELAY_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            udpRecoveryGuard.set(false)
+            if (!running) {
+                appendLog("NETWORK RECOVERY: reconnect attempt $attempt/$MAX_AUTO_RECONNECT_ATTEMPTS")
+                startSession(preserveScreen = true)
+            }
+        }, "IC705-Network-Recovery").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     private fun sendAudioRaw(
         data: ByteArray
     ) {
@@ -3080,7 +3108,12 @@ class MainActivity : Activity() {
                     data.size
                 )
 
-            socket.send(packet)
+            try {
+                socket.send(packet)
+            } catch (e: Exception) {
+                handleUdpSendFailure("audio", e)
+                throw e
+            }
         }
     }
 
@@ -3100,10 +3133,14 @@ class MainActivity : Activity() {
     ) {
         runOnUiThread {
             val activeTint =
-                ColorStateList.valueOf(Color.BLACK)
+                ColorStateList.valueOf(
+                    Color.rgb(0, 190, 0)
+                )
 
             val inactiveTint =
-                ColorStateList.valueOf(Color.BLACK)
+                ColorStateList.valueOf(
+                    Color.rgb(210, 210, 210)
+                )
 
             when (modeCode) {
                 0x01 -> {
@@ -3380,8 +3417,6 @@ class MainActivity : Activity() {
                     buffer.size
                 )
                 socket.receive(packet)
-                lastSerialPacketAt = System.currentTimeMillis()
-                networkWarningLogged = false
                 val data =
                     packet.data.copyOf(packet.length)
                 processSerialIncomingPacket(data)
@@ -3389,10 +3424,6 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 if (running) {
                     appendLog("SERIAL RECEIVE ERROR: ${e.message}")
-                    if (!socket.isClosed) {
-                        try { Thread.sleep(50) } catch (_: InterruptedException) {}
-                        continue
-                    }
                 }
                 break
             }
@@ -3453,7 +3484,9 @@ class MainActivity : Activity() {
             data.size >= 22 &&
             (data[16].toInt() and 0xFF) == 0xC1
         ) {
+            noteIncomingSequence(serialReceiveSequenceState, readLeShort(data, 6))
             scopeTransportPackets++
+            scopeLastTransportAtMs = System.currentTimeMillis()
             scopeLastUdpBytes = data.size
 
             val payloadStart = 21
@@ -3469,54 +3502,28 @@ class MainActivity : Activity() {
             val chunk = data.copyOfRange(payloadStart, payloadStart + declaredLength)
             scopeLastCivBytes = chunk.size
 
-            // IC-705 WLAN scope: the proven diagnostic program receives a
-            // complete 27 00 ... FD scope record inside each C1 packet.
-            // The complete raw scope record is exactly 493 bytes:
-            //   27 00 + 490-byte payload + FD
-            // Do not use the surrounding FE FE E0 A4 bytes for the length.
+            // IC-705 WLAN scope: raw 27 00 ... FD record embedded anywhere in C1.
             var marker = -1
-            for (i in 0 until chunk.size - 1) {
+            for (i in 0 until maxOf(0, chunk.size - 2)) {
                 if ((chunk[i].toInt() and 0xFF) == 0x27 &&
-                    (chunk[i + 1].toInt() and 0xFF) == 0x00) {
+                    (chunk[i + 1].toInt() and 0xFF) == 0x00 &&
+                    (chunk[i + 2].toInt() and 0xFF) == 0x00) {
                     marker = i
                     break
                 }
             }
-
             if (marker >= 0) {
-                val expectedEnd = marker + 493
-
-                if (expectedEnd <= chunk.size &&
-                    (chunk[expectedEnd - 1].toInt() and 0xFF) == 0xFD) {
-
-                    val rawScope = chunk.copyOfRange(marker, expectedEnd)
-
-                    scopeRaw27Frames++
-                    scopeCivFrames++
-                    processSpectrumScopeFrame(
-                        rawScope.copyOfRange(2, rawScope.size - 1)
-                    )
-                    return
-                }
-
-                // Fallback for a fragmented/variable transport packet.
-                // This is not used by the known-good IC-705 LAN capture,
-                // but preserves the existing buffering path.
                 var fd = -1
-                for (i in marker + 2 until chunk.size) {
-                    if ((chunk[i].toInt() and 0xFF) == 0xFD) {
-                        fd = i
-                        break
-                    }
+                for (i in marker + 3 until chunk.size) {
+                    if ((chunk[i].toInt() and 0xFF) == 0xFD) { fd = i; break }
                 }
-                if (fd >= 0) {
+                if (fd > marker) {
                     val rawScope = chunk.copyOfRange(marker, fd + 1)
-                    if (rawScope.size == 493) {
+                    if (rawScope.size >= 493) {
                         scopeRaw27Frames++
+                        scopeLastRawFrameAtMs = System.currentTimeMillis()
                         scopeCivFrames++
-                        processSpectrumScopeFrame(
-                            rawScope.copyOfRange(2, rawScope.size - 1)
-                        )
+                        processSpectrumScopeFrame(rawScope.copyOfRange(2, rawScope.size - 1))
                         return
                     }
                 }
@@ -3552,49 +3559,65 @@ class MainActivity : Activity() {
         scopeCivFrames = 0L
         scopeRaw27Frames = 0L
         scopeDecodedFrames = 0L
+        scopeLastTransportAtMs = 0L
+        scopeLastRawFrameAtMs = 0L
+        scopeLastDecodedAtMs = 0L
         scopePollCount = 0L
         scopeAwaitingResponse = false
         scopeLastUdpBytes = 0
         scopeLastCivBytes = 0
 
-        // Mark the scope active before sending the enable commands.
-        // The IC-705 can begin transmitting the first 27 00 frame immediately
-        // after the first enable command, so the receive path must already
-        // consider the scope active.
+        // Mark the receiver active and display the scope first. The first
+        // waveform frames can arrive immediately after the radio's ON command.
         scopeStarted = true
-
         runOnUiThread {
             scopeView.visibility = View.VISIBLE
             sensitivityRow.visibility = View.VISIBLE
             scopeToggleButton.text = "SPECTRUM OFF"
         }
-
-        updateScopeInfo("Spectrum: enabling IC-705 scope output...")
+        updateScopeInfo("Spectrum: turning scope ON before setting CENTER mode...")
 
         try {
-            val commands = arrayOf(
-                byteArrayOf(0x27, 0x10, 0x01),
-                byteArrayOf(0x27, 0x11, 0x01),
+            // Reset stale radio-side scope state after a radio reboot, then
+            // re-enable the scope and waveform before configuring CENTER.
+            appendLog("SCOPE START: clearing prior scope state.")
+            sendScopeCommand(byteArrayOf(0x27, 0x11, 0x00))
+            Thread.sleep(80)
+            sendScopeCommand(byteArrayOf(0x27, 0x10, 0x00))
+            Thread.sleep(150)
+
+            // Enable scope status and waveform output before configuring CENTER.
+            appendLog("SCOPE START: enabling scope status (CI-V 27 10 01).")
+            sendScopeCommand(byteArrayOf(0x27, 0x10, 0x01))
+            Thread.sleep(150)
+            appendLog("SCOPE START: enabling waveform data (CI-V 27 11 01).")
+            sendScopeCommand(byteArrayOf(0x27, 0x11, 0x01))
+            Thread.sleep(150)
+            updateScopeInfo("Spectrum: ON — applying CENTER mode...")
+
+            appendLog("SCOPE MODE: selecting CENTER (CI-V 27 14 00 00).")
+            val centerCommands = arrayOf(
                 byteArrayOf(0x27, 0x12, 0x00),
                 byteArrayOf(0x27, 0x13, 0x00),
                 byteArrayOf(0x27, 0x14, 0x00, 0x00),
                 buildScopeSpanCommand(100_000L)
             )
-            for (cmd in commands) {
+            for (cmd in centerCommands) {
                 sendScopeCommand(cmd)
                 Thread.sleep(80)
             }
-            // No repeated 27 00 polling. The radio is already streaming raw 27 00 frames.
+            // No repeated 27 00 polling; the radio streams frames after both ON commands.
         } catch (e: Exception) {
-            appendLog("SCOPE ENABLE SEND ERROR: ${e.message}")
-            updateScopeInfo("Spectrum: enable command failed")
+            appendLog("SCOPE START/MODE ERROR: ${e.message}")
+            updateScopeInfo("Spectrum: ON — setup failed; press SPECTRUM OFF then ON to retry")
             return
         }
 
-        updateScopeInfo(
-            "Spectrum: ON — receiving IC-705 27 00 scope frames"
-        )
+        updateScopeInfo("Spectrum: ON — CENTER mode, receiving IC-705 scope frames")
     }
+
+    private fun waterfallPaletteName(index: Int): String =
+        arrayOf("Blue", "Green", "Amber", "Purple", "Grayscale")[index.coerceIn(0, 4)]
 
     private fun startSignalMeterPolling() {
         signalMeterScheduler?.shutdownNow()
@@ -4066,14 +4089,8 @@ class MainActivity : Activity() {
         val startIndex = ((475 - count) / 2).coerceAtLeast(0)
         val samples = IntArray(count)
         for (i in 0 until count) samples[i] = waveform[startIndex + i].toInt() and 0xFF
-        lastScopeFrameAt = System.currentTimeMillis()
-        if (scopeRecoveryWaitingForFrame) {
-            scopeRecoveryWaitingForFrame = false
-            scopeRecoveryAttempt = 0
-            appendLog("SCOPE RECOVERY: 27 00 FRAME RESTORED")
-            addNetworkEvent("SCOPE RECOVERY: 27 00 FRAME RESTORED")
-        }
         scopeDecodedFrames++
+        scopeLastDecodedAtMs = System.currentTimeMillis()
         scopeUiUpdateCounter++
         if (::scopeView.isInitialized) scopeView.updateSpectrum(centerHz, totalSpanHz, samples)
         if (scopeUiUpdateCounter % 10L == 0L) {
@@ -4137,6 +4154,7 @@ class MainActivity : Activity() {
             (civ[civ.size - 1].toInt() and 0xFF) == 0xFD) {
             scopeCivFrames++
             scopeRaw27Frames++
+            scopeLastRawFrameAtMs = System.currentTimeMillis()
             processSpectrumScopeFrame(civ.copyOfRange(2, civ.size - 1))
             return
         }
@@ -4187,9 +4205,7 @@ class MainActivity : Activity() {
             if (hz > 0L) {
                 frequencyHz = hz
                 frequencyWriteResponseReceived = true
-                runOnUiThread {
-                    scopeView.centerFrequencyHz = hz
-                }
+                displayRadioFrequency(hz)
                 appendLog(
                     "IC-705 MAIN VFO RESPONSE: ${formatFrequency(hz)}"
                 )
@@ -4232,6 +4248,7 @@ class MainActivity : Activity() {
                 modeNameFromCode(modeCode)
 
             activeModeCode = modeCode
+            autoSidebandChangePending = false
             modeReceived = true
             updateModeButtons(modeCode)
 
@@ -4257,7 +4274,8 @@ class MainActivity : Activity() {
             (civ[1].toInt() and 0xFF) == 0xFE &&
             (civ[2].toInt() and 0xFF) == 0xE0 &&
             (civ[3].toInt() and 0xFF) == 0xA4 &&
-            (civ[4].toInt() and 0xFF) == 0x15 &&            (civ[5].toInt() and 0xFF) == 0x02 &&
+            (civ[4].toInt() and 0xFF) == 0x15 &&
+            (civ[5].toInt() and 0xFF) == 0x02 &&
             (civ[civ.size - 1].toInt() and 0xFF) == 0xFD
         ) {
             val highBcd = civ[6].toInt() and 0xFF
@@ -4288,9 +4306,7 @@ class MainActivity : Activity() {
             if (hz > 0L) {
                 frequencyHz = hz
                 frequencyReceived = true
-                runOnUiThread {
-                    scopeView.centerFrequencyHz = hz
-                }
+                displayRadioFrequency(hz)
                 appendLog(
                     "IC-705 FREQUENCY READ: ${formatFrequency(hz)}"
                 )
@@ -4355,6 +4371,39 @@ class MainActivity : Activity() {
             multiplier *= 100L
         }
         return value
+    }
+
+    private fun displayRadioFrequency(hz: Long) {
+        runOnUiThread {
+            if (::frequencyLabelView.isInitialized) {
+                frequencyLabelView.text = "Frequency: ${formatFrequency(hz)}"
+            }
+            if (::frequencyEdit.isInitialized && !frequencyEdit.hasFocus()) {
+                frequencyEdit.setText(hz.toString())
+            }
+            if (::scopeView.isInitialized) scopeView.centerFrequencyHz = hz
+        }
+        if (connected) applyAutomaticSideband(hz)
+    }
+
+    private fun applyAutomaticSideband(hz: Long) {
+        val targetMode = when {
+            hz > 12_000_000L -> 0x01
+            hz < 11_990_000L -> 0x00
+            else -> return
+        }
+        if (!running || !serialOpen || activeModeCode == targetMode) return
+        synchronized(autoSidebandLock) {
+            if (autoSidebandChangePending || activeModeCode == targetMode) return
+            autoSidebandChangePending = true
+        }
+        val name = if (targetMode == 0x01) "USB" else "LSB"
+        appendLog("AUTO MODE: ${formatFrequency(hz)} selects $name.")
+        setOperatingModeFromUi(name, targetMode)
+        Thread {
+            try { Thread.sleep(1500L) } catch (_: InterruptedException) { }
+            synchronized(autoSidebandLock) { autoSidebandChangePending = false }
+        }.start()
     }
     private fun formatFrequency(
         hz: Long
@@ -4550,7 +4599,12 @@ class MainActivity : Activity() {
                     data,
                     data.size
                 )
-            socket.send(packet)
+            try {
+                socket.send(packet)
+            } catch (e: Exception) {
+                handleUdpSendFailure("serial", e)
+                throw e
+            }
         }
     }
     private fun receiveSerialExpected(
@@ -4632,18 +4686,12 @@ class MainActivity : Activity() {
             try {
                 val packet = DatagramPacket(buffer, buffer.size)
                 socket.receive(packet)
-                lastControlPacketAt = System.currentTimeMillis()
-                networkWarningLogged = false
                 val data = packet.data.copyOf(packet.length)
                 processIncomingPacket(data)
             } catch (e: java.net.SocketTimeoutException) {
             } catch (e: Exception) {
                 if (running) {
                     appendLog("RECEIVE ERROR: ${e.message}")
-                    if (!socket.isClosed) {
-                        try { Thread.sleep(50) } catch (_: InterruptedException) {}
-                        continue
-                    }
                 }
                 break
             }
@@ -5097,6 +5145,79 @@ class MainActivity : Activity() {
             sendRaw(packet)
         }
     }
+    private fun noteIncomingSequence(state: ReceiveSequenceState, sequence: Int) {
+        synchronized(state) {
+            val previous = state.newest
+            if (previous == null) {
+                state.newest = sequence
+                state.missing.remove(sequence)
+                return
+            }
+            val distance = (sequence - previous) and 0xFFFF
+            if (distance == 0) return
+            if (distance > 0x8000) {
+                state.missing.remove(sequence)
+                return
+            }
+            if (distance > 1) {
+                if (distance <= maxTrackedReceiveGaps + 1) {
+                    for (step in 1 until distance) {
+                        val missingSequence = (previous + step) and 0xFFFF
+                        if (state.missing.size < maxTrackedReceiveGaps) {
+                            if (!state.missing.containsKey(missingSequence)) {
+                                state.missing[missingSequence] = 0
+                            }
+                        }
+                    }
+                } else {
+                    // A large jump usually means a stream restart or substantial loss.
+                    state.missing.clear()
+                }
+            }
+            state.missing.remove(sequence)
+            state.newest = sequence
+        }
+    }
+
+    private fun requestNextMissingPacket(
+        state: ReceiveSequenceState,
+        socket: DatagramSocket?,
+        localStreamId: Int,
+        remoteStreamId: Int,
+        streamName: String
+    ) {
+        if (!running || socket == null || socket.isClosed || localStreamId == 0 || remoteStreamId == 0) return
+        val requestedSequence = synchronized(state) {
+            val entry = state.missing.entries.firstOrNull { it.value < maxReceiveRetransmitRequests }
+                ?: return@synchronized null
+            state.missing[entry.key] = entry.value + 1
+            entry.key
+        } ?: return
+
+        // Wait for packet reordering, then request this missing sequence using IC-705 type 0x01.
+        val request = ByteArray(16)
+        writeLeInt(request, 0, request.size)
+        request[4] = 0x01
+        request[5] = 0x00
+        writeLeShort(request, 6, requestedSequence)
+        writeBeInt(request, 8, localStreamId)
+        writeBeInt(request, 12, remoteStreamId)
+        try {
+            socket.send(DatagramPacket(request, request.size))
+            appendLog("$streamName UDP gap: requested missing sequence $requestedSequence")
+        } catch (e: Exception) {
+            handleUdpSendFailure(streamName, e)
+            if (running) appendLog("$streamName retransmit request failed: ${e.message}")
+        }
+    }
+
+    private fun resetReceiveSequenceState(state: ReceiveSequenceState) {
+        synchronized(state) {
+            state.newest = null
+            state.missing.clear()
+        }
+    }
+
     private fun retransmit(sequence: Int) {
         val packet = trackedPackets[sequence]
             ?: return
@@ -5120,7 +5241,12 @@ class MainActivity : Activity() {
                 data,
                 data.size
             )
-            socket.send(packet)
+            try {
+                socket.send(packet)
+            } catch (e: Exception) {
+                handleUdpSendFailure("control", e)
+                throw e
+            }
         }
     }
     private fun receiveExpected(
@@ -5184,659 +5310,18 @@ class MainActivity : Activity() {
         }
         return null
     }
-    private fun startNetworkWatchdog() {
-        stopNetworkWatchdog()
-        val now = System.currentTimeMillis()
-        lastControlPacketAt = now
-        lastSerialPacketAt = now
-        lastAudioPacketAt = now
-        lastCommonStallAt = 0L
-        networkWarningLogged = false
-
-        networkWatchdogScheduler =
-            Executors.newSingleThreadScheduledExecutor()
-
-        networkWatchdogScheduler?.scheduleAtFixedRate(
-            {
-                if (!running || !connected) return@scheduleAtFixedRate
-
-                val nowMs = System.currentTimeMillis()
-                val controlAge = nowMs - lastControlPacketAt
-                val serialAge = nowMs - lastSerialPacketAt
-                val audioPcmAge =
-                    if (lastAudioPcmAt > 0L) nowMs - lastAudioPcmAt
-                    else Long.MAX_VALUE
-                val scopeAge =
-                    if (lastScopeFrameAt > 0L) nowMs - lastScopeFrameAt
-                    else Long.MAX_VALUE
-
-                recordNetworkQualitySample()
-
-                val commonAges = mutableListOf<Long>()
-                if (connected) commonAges.add(controlAge)
-                if (serialOpen) commonAges.add(serialAge)
-                if (audioExpected) commonAges.add(audioPcmAge)
-                if (scopeStarted) commonAges.add(scopeAge)
-
-                if (
-                    commonAges.size >= 2 &&
-                    commonAges.all { it >= NETWORK_COMMON_STALL_AFTER_MS } &&
-                    nowMs - lastCommonStallAt >= NETWORK_COMMON_STALL_COOLDOWN_MS
-                ) {
-                    lastCommonStallAt = nowMs
-                    appendLog(
-                        "NETWORK STALL: multiple UDP streams paused " +
-                                "for ${commonAges.maxOrNull() ?: 0}ms"
-                    )
-                    addNetworkEvent(
-                        "COMMON UDP STALL: C=${networkAge(controlAge)} " +
-                                "S=${networkAge(serialAge)} " +
-                                "AUDIO=${networkAge(audioPcmAge)} " +
-                                "SCOPE=${networkAge(scopeAge)}"
-                    )
-                }
-
-                if (
-                    audioExpected &&
-                    audioPcmAge >= AUDIO_RECOVERY_AFTER_MS &&
-                    nowMs - lastAudioRecoveryAt >= AUDIO_RECOVERY_COOLDOWN_MS &&
-                    nowMs >= audioRecoveryPausedUntilAt &&
-                    !audioRecoveryInProgress &&
-                    (!audioRecoveryWaitingForPcm || nowMs >= audioRecoveryWaitUntilAt)
-                ) {
-                    appendLog(
-                        "AUDIO WATCHDOG: no PCM for ${audioPcmAge}ms — local audio recovery"
-                    )
-                    addNetworkEvent(
-                        "AUDIO RECOVERY: silence ${audioPcmAge}ms"
-                    )
-                    lastAudioRecoveryAt = nowMs
-                    recoverAudioStream()
-                }
-
-                if (
-                    scopeStarted &&
-                    scopeAge >= SCOPE_RECOVERY_AFTER_MS &&
-                    nowMs - lastScopeRecoveryAt >= SCOPE_RECOVERY_COOLDOWN_MS &&
-                    nowMs >= scopeRecoveryPausedUntilAt &&
-                    !scopeRecoveryInProgress &&
-                    (!scopeRecoveryWaitingForFrame || nowMs >= scopeRecoveryWaitUntilAt)
-                ) {
-                    appendLog(
-                        "SCOPE WATCHDOG: no decoded 27 00 frame for ${scopeAge}ms — local spectrum recovery"
-                    )
-                    addNetworkEvent(
-                        "SCOPE RECOVERY: silence ${scopeAge}ms"
-                    )
-                    lastScopeRecoveryAt = nowMs
-                    recoverSpectrumStream()
-                }
-
-                if (
-                    controlAge >= NETWORK_WARN_AFTER_MS ||
-                    (serialOpen && serialAge >= NETWORK_WARN_AFTER_MS) ||
-                    (audioExpected && audioPcmAge >= NETWORK_WARN_AFTER_MS) ||
-                    (scopeStarted && scopeAge >= NETWORK_WARN_AFTER_MS)
-                ) {
-                    if (!networkWarningLogged) {
-                        appendLog(
-                            "NETWORK WARNING: control=${controlAge}ms " +
-                                    "serial=${serialAge}ms " +
-                                    "audioPCM=${networkAge(audioPcmAge)} " +
-                                    "scope=${networkAge(scopeAge)}"
-                        )
-                        addNetworkEvent(
-                            "WARNING: C=${controlAge} S=${serialAge} " +
-                                    "AUDIO=${networkAge(audioPcmAge)} " +
-                                    "SCOPE=${networkAge(scopeAge)}"
-                        )
-                        networkWarningLogged = true
-                    }
-                }
-
-                // v28.4: audio-only failures do not rebuild the complete session.
-                // A full reconnect is allowed only when BOTH control and CI-V have
-                // stopped receiving for the sustained threshold.
-                if (
-                    serialOpen &&
-                    controlAge >= FULL_SESSION_RECOVERY_AFTER_MS &&
-                    serialAge >= FULL_SESSION_RECOVERY_AFTER_MS &&
-                    nowMs - lastFullSessionRecoveryAt >= FULL_SESSION_RECOVERY_COOLDOWN_MS &&
-                    !fullSessionRecoveryInProgress
-                ) {
-                    lastFullSessionRecoveryAt = nowMs
-                    appendLog(
-                        "FULL SESSION WATCHDOG: control + CI-V silent for " +
-                                maxOf(controlAge, serialAge) +
-                                "ms — rebuilding complete IC-705 session"
-                    )
-                    addNetworkEvent(
-                        "FULL SESSION RECOVERY: C=" + controlAge + "ms S=" + serialAge + "ms"
-                    )
-                    recoverFullSession()
-                }
-
-                if (
-                    controlAge >= NETWORK_RESTART_AFTER_MS &&
-                    receiverThread?.isAlive != true &&
-                    !fullSessionRecoveryInProgress
-                ) {
-                    appendLog("NETWORK RECOVERY: restarting control receiver")
-                    addNetworkEvent("RECOVERY: control receiver")
-                    startReceiverThread()
-                }
-
-                if (
-                    serialOpen &&
-                    serialAge >= NETWORK_RESTART_AFTER_MS &&
-                    serialReceiverThread?.isAlive != true
-                ) {
-                    appendLog("NETWORK RECOVERY: restarting CI-V receiver")
-                    addNetworkEvent("RECOVERY: CI-V receiver")
-                    startSerialReceiverThread()
-                }
-
-                if (
-                    controlAge < NETWORK_WARN_AFTER_MS &&
-                    (!serialOpen || serialAge < NETWORK_WARN_AFTER_MS) &&
-                    (!audioExpected || audioPcmAge < NETWORK_WARN_AFTER_MS) &&
-                    (!scopeStarted || scopeAge < NETWORK_WARN_AFTER_MS)
-                ) {
-                    networkWarningLogged = false
-                }
-            },
-            NETWORK_WATCHDOG_INTERVAL_MS,
-            NETWORK_WATCHDOG_INTERVAL_MS,
-            TimeUnit.MILLISECONDS
-        )
-    }
-
-    // v28.4: full-session recovery is deliberately separate from the audio and
-    // spectrum recovery paths. It is reached only after both control and CI-V
-    // have been silent for the sustained watchdog threshold.
-    private fun recoverFullSession() {
-        if (!running || fullSessionRecoveryInProgress) return
-
-        fullSessionRecoveryInProgress = true
-        appendLog("FULL SESSION RECOVERY: starting")
-        addNetworkEvent("FULL SESSION RECOVERY: starting")
-
-        Thread {
+    private fun stopSession(preserveScreen: Boolean = false) {
+        streamDiagnosticHandler.removeCallbacks(streamStallWatchdog)
+        streamDiagnosticHandler.removeCallbacks(streamDiagnosticTask)
+        if (preserveScreen) {
+            stopScopePolling()
+            scopeStarted = false
+            resetScopeAssembly()
+        } else {
             try {
-                val radioIp = settingsIpEdit.text.toString().trim()
-                val username = settingsUsernameEdit.text.toString().trim()
-                val password = settingsPasswordEdit.text.toString()
-
-                // Stop the old session locally first. Do not call stopSession()
-                // here because that routine is the user's explicit/manual
-                // disconnect path and would send the normal disconnect sequence.
-                running = false
-                connected = false
-                audioExpected = false
-                audioRunning = false
-                serialOpen = false
-                scopeStarted = false
-
-                cleanupSocketOnly()
-
-                appendLog("FULL SESSION RECOVERY: old sockets closed")
-                addNetworkEvent("FULL SESSION RECOVERY: old sockets closed")
-
-                Thread.sleep(1000)
-
-                if (radioIp.isEmpty() || username.isEmpty() || password.isEmpty()) {
-                    appendLog("FULL SESSION RECOVERY: saved connection settings are incomplete")
-                    addNetworkEvent("FULL SESSION RECOVERY: settings incomplete")
-                    return@Thread
-                }
-
-                // Reinitialize the same state used by startSession(), without
-                // changing the working IC-705 protocol implementation.
-                authOk = false
-                gotA8 = false
-                connInfoOk = false
-                teardownStarted = false
-                outerSequence = 1
-                authInnerSequence = 0
-                pkt7Sequence = 2
-                pkt7InnerSequence = 0x8304
-                serialLocalSid = 0
-                serialRemoteSid = 0
-                serialOuterSequence = 1
-                serialPkt7Sequence = 2
-                serialCivSequence = 1
-                serialOpen = false
-                audioRunning = false
-                audioExpected = false
-                audioHaveSequence = false
-                audioLastSequence = 0
-                audioPacketCount = 0L
-                audioDebugPacketCount = 0
-                frequencyReceived = false
-                frequencyWriteResponseReceived = false
-                frequencyWriteRejected = false
-                frequencyHz = 0L
-                signalMeterValue = 0
-                scopeTransportPackets = 0L
-                scopeCivFrames = 0L
-                scopeRaw27Frames = 0L
-                scopeDecodedFrames = 0L
-                scopePollCount = 0L
-                scopeAwaitingResponse = false
-                scopeLastUdpBytes = 0
-                scopeLastCivBytes = 0
-                stopScopePolling()
-                resetScopeAssembly()
-                trackedPackets.clear()
-                serialTrackedPackets.clear()
-
-                running = true
-                appendLog("FULL SESSION RECOVERY: reconnecting to " + radioIp)
-                addNetworkEvent("FULL SESSION RECOVERY: reconnecting")
-
-                sessionThread = Thread {
-                    try {
-                        runSession(radioIp, username, password)
-                    } catch (e: Exception) {
-                        appendLog("FULL SESSION RECOVERY ERROR: " + e.message)
-                        if (running) {
-                            running = false
-                            cleanupSocketOnly()
-                        }
-                    }
-                }.apply {
-                    name = "IC705-Full-Session-Recovery"
-                    isDaemon = true
-                    start()
-                }
-            } catch (e: Exception) {
-                appendLog("FULL SESSION RECOVERY FAILED: " + e.message)
-                addNetworkEvent("FULL SESSION RECOVERY FAILED: " + e.message)
-            } finally {
-                fullSessionRecoveryInProgress = false
+                stopSpectrumScope()
+            } catch (_: Exception) {
             }
-        }.apply {
-            name = "IC705-Full-Session-Recovery-Controller"
-            isDaemon = true
-            start()
-        }
-    }
-
-    private fun recordNetworkQualitySample() {
-        val now = System.currentTimeMillis()
-
-        val controlAge = if (lastControlPacketAt > 0L) now - lastControlPacketAt else Long.MAX_VALUE
-        val serialAge = if (lastSerialPacketAt > 0L) now - lastSerialPacketAt else Long.MAX_VALUE
-        val audioAge = if (lastAudioPcmAt > 0L) now - lastAudioPcmAt else Long.MAX_VALUE
-        val scopeAge = if (lastScopeFrameAt > 0L) now - lastScopeFrameAt else Long.MAX_VALUE
-
-        fun score(age: Long, goodMs: Long, fairMs: Long, badMs: Long): Int {
-            return when {
-                age <= goodMs -> 100
-                age <= fairMs -> 70
-                age <= badMs -> 35
-                else -> 0
-            }
-        }
-
-        val controlScore = if (!connected) 0 else score(controlAge, NETWORK_GOOD_AGE_MS, 3000L, 8000L)
-        val serialScore = if (!serialOpen) 100 else score(serialAge, NETWORK_GOOD_AGE_MS, 3000L, 8000L)
-        val audioScore = if (!audioExpected) 100 else if (audioRunning) {
-            score(audioAge, NETWORK_GOOD_AGE_MS, AUDIO_RECOVERY_AFTER_MS, 6000L)
-        } else 20
-        val scopeScore = if (!scopeStarted) 100 else score(scopeAge, NETWORK_GOOD_AGE_MS, SCOPE_RECOVERY_AFTER_MS, 7000L)
-
-        val weighted = (
-            controlScore * 20 +
-                    serialScore * 20 +
-                    audioScore * 35 +
-                    scopeScore * 25
-            ) / 100
-
-        val activeScores = mutableListOf<Int>()
-        if (connected) activeScores.add(controlScore)
-        if (serialOpen) activeScores.add(serialScore)
-        if (audioExpected) activeScores.add(audioScore)
-        if (scopeStarted) activeScores.add(scopeScore)
-
-        val q = if (activeScores.isEmpty()) 0 else minOf(
-            weighted,
-            activeScores.minOrNull() ?: weighted
-        )
-
-        val status = when {
-            !connected -> "DISCONNECTED"
-            q >= 85 && activeScores.all { it >= 85 } -> "GOOD"
-            q >= 60 -> "FAIR"
-            else -> "BAD"
-        }
-
-        synchronized(networkHistoryLock) {
-            if (networkHistory.size >= NETWORK_HISTORY_MAX_SAMPLES) networkHistory.removeFirst()
-            networkHistory.addLast(
-                NetworkQualitySample(
-                    now, controlAge, serialAge, audioAge, scopeAge,
-                    q.coerceIn(0, 100), status
-                )
-            )
-        }
-
-        if (::networkQualitySummary.isInitialized) {
-            runOnUiThread {
-                networkQualitySummary.text =
-                    "Quality: ${q}% $status | " +
-                            "C=${networkAge(controlAge)} " +
-                            "S=${networkAge(serialAge)} " +
-                            "A=${networkAge(audioAge)} " +
-                            "W=${networkAge(scopeAge)}"
-                updateNetworkQualityIndicator(q, status)
-                refreshNetworkHistoryUi()
-            }
-        }
-    }
-
-    private fun addNetworkEvent(message: String) {
-        val line = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()) + "  " + message
-        synchronized(networkHistoryLock) {
-            if (networkEvents.size >= NETWORK_EVENT_MAX_ENTRIES) networkEvents.removeFirst()
-            networkEvents.addLast(line)
-        }
-    }
-
-    private fun refreshNetworkHistoryUi() {
-        if (!::networkHistoryText.isInitialized) return
-        val samples = synchronized(networkHistoryLock) { networkHistory.toList() }
-        val events = synchronized(networkHistoryLock) { networkEvents.toList() }
-        val out = StringBuilder()
-        out.append("HISTORIC QUALITY BAR (newest at right)\n")
-        out.append("100 | ")
-        samples.takeLast(100).forEach { x ->
-            out.append(if (x.quality >= 90) "█" else if (x.quality >= 70) "▓" else if (x.quality >= 40) "▒" else "░")
-        }
-        out.append("\n  0 | ")
-        samples.takeLast(100).forEach { x ->
-            out.append(if (x.quality >= 50) " " else "█")
-        }
-        out.append("\n\nSAMPLES - newest last\n")
-        samples.takeLast(120).forEach { x ->
-            val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(x.timestampMs))
-            out.append(t).append(" Q=").append(x.quality).append("% ").append(x.status)
-                .append(" C=").append(networkAge(x.controlAgeMs))
-                .append(" S=").append(networkAge(x.serialAgeMs))
-                .append(" A=").append(networkAge(x.audioAgeMs))
-                .append(" W=").append(networkAge(x.scopeAgeMs)).append("\n")
-        }
-        if (events.isNotEmpty()) {
-            out.append("\nNETWORK EVENTS\n")
-            events.forEach { out.append(it).append("\n") }
-        }
-        networkHistoryText.text = out.toString()
-    }
-
-    private fun clearNetworkHistory() {
-        synchronized(networkHistoryLock) {
-            networkHistory.clear()
-            networkEvents.clear()
-        }
-        if (::networkQualitySummary.isInitialized) {
-            runOnUiThread {
-                networkQualitySummary.text = "Quality: waiting for connection"
-                networkHistoryText.text = "No network samples yet."
-            }
-        }
-    }
-
-    private fun copyNetworkDiagnosticReport() {
-        val samples = synchronized(networkHistoryLock) { networkHistory.toList() }
-        val events = synchronized(networkHistoryLock) { networkEvents.toList() }
-        val report = StringBuilder()
-        report.append("IC-705 REMOTE NETWORK DIAGNOSTIC REPORT\n")
-        report.append("App version: v28.4\n")
-        report.append("Generated: ")
-        report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
-        report.append("\nConnected=").append(connected).append(" Running=").append(running)
-            .append(" CI-V=").append(serialOpen)
-            .append(" Audio=").append(audioRunning)
-            .append(" Spectrum=").append(scopeStarted)
-            .append("\n")
-            .append("AudioPCM=").append(networkAge(if (lastAudioPcmAt > 0L) System.currentTimeMillis() - lastAudioPcmAt else Long.MAX_VALUE))
-            .append(" ScopeFrame=").append(networkAge(if (lastScopeFrameAt > 0L) System.currentTimeMillis() - lastScopeFrameAt else Long.MAX_VALUE))
-            .append("\n")
-            .append("AudioLocalPort=").append(audioLocalPort)
-            .append(" AudioRXPackets=").append(audioRxPacketCount)
-            .append(" AudioPCMPackets=").append(audioPcmPacketCount)
-            .append(" AudioPKT7RX=").append(audioPkt7RxCount)
-            .append(" AudioLastRX=").append(networkAge(if (lastAudioRxAt > 0L) System.currentTimeMillis() - lastAudioRxAt else Long.MAX_VALUE))
-            .append("\n\n")
-        report.append("time,quality,status,controlAgeMs,serialAgeMs,audioAgeMs,scopeAgeMs\n")
-        samples.forEach { x ->
-            report.append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(x.timestampMs)))
-                .append(",").append(x.quality).append(",").append(x.status)
-                .append(",").append(networkAge(x.controlAgeMs))
-                .append(",").append(networkAge(x.serialAgeMs))
-                .append(",").append(networkAge(x.audioAgeMs))
-                .append(",").append(networkAge(x.scopeAgeMs)).append("\n")
-        }
-        report.append("\nEVENTS\n")
-        events.forEach { report.append(it).append("\n") }
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("IC-705 network diagnostic", report.toString()))
-        android.widget.Toast.makeText(this, "Diagnostic report copied. Paste it into ChatGPT.", android.widget.Toast.LENGTH_LONG).show()
-    }
-
-    private fun recoverAudioStream() {
-        if (!running || !audioExpected || audioRecoveryInProgress) {
-            return
-        }
-        if (System.currentTimeMillis() < audioRecoveryPausedUntilAt) {
-            return
-        }
-        if (audioRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS) {
-            audioRecoveryPausedUntilAt = System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
-            audioRecoveryWaitingForPcm = false
-            appendLog("AUDIO RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS failed attempts; waiting 30 seconds")
-            addNetworkEvent("AUDIO RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS attempts")
-            return
-        }
-
-        audioRecoveryInProgress = true
-        audioRecoveryAttempt++
-        appendLog("AUDIO RECOVERY ATTEMPT #$audioRecoveryAttempt")
-        addNetworkEvent("AUDIO RECOVERY ATTEMPT #$audioRecoveryAttempt")
-
-        Thread {
-            try {
-                appendLog("AUDIO RECOVERY: stopping only the audio stream")
-                audioRunning = false
-
-                try { audioScheduler?.shutdownNow() } catch (_: Exception) {}
-                audioScheduler = null
-
-                try { audioReceiverThread?.interrupt() } catch (_: Exception) {}
-                audioReceiverThread = null
-
-                try { audioTrack?.pause() } catch (_: Exception) {}
-                try { audioTrack?.flush() } catch (_: Exception) {}
-                try { audioTrack?.stop() } catch (_: Exception) {}
-                try { audioTrack?.release() } catch (_: Exception) {}
-                audioTrack = null
-
-                // v27.6: do NOT send the audio-session disconnect packet here.
-                // v27.5 successfully completed the recovery handshake, but the
-                // repeated ~7-second audio drop pattern strongly suggests that
-                // explicitly disconnecting the radio-side stream during recovery
-                // may be contributing to the recurring loss. Close only our local
-                // UDP socket, then perform the normal PKT3/PKT4/PKT6 handshake.
-                try { audioSocket?.close() } catch (_: Exception) {}
-                audioSocket = null
-
-                try { audioReceiverThread?.interrupt() } catch (_: Exception) {}
-                audioReceiverThread = null
-
-                appendLog("AUDIO RECOVERY: local UDP socket closed; old RX thread reset; no radio disconnect sent")
-                appendLog(
-                    "AUDIO RECOVERY DIAG: RX=" + audioRxPacketCount +
-                            " PCM=" + audioPcmPacketCount +
-                            " PKT7=" + audioPkt7RxCount
-                )
-                addNetworkEvent("AUDIO RECOVERY: local socket reset only")
-
-                Thread.sleep(250)
-
-                if (!running) {
-                    return@Thread
-                }
-
-                val radioIp = settingsIpEdit.text.toString().trim()
-                appendLog(
-                    "AUDIO RECOVERY: reopening UDP $AUDIO_PORT to $radioIp"
-                )
-
-                openAudioReceive(radioIp)
-
-                appendLog(
-                    "AUDIO RECOVERY DIAG: new local port=" + audioLocalPort +
-                            " localSID=" + intToHex(audioLocalSid)
-                )
-
-                lastAudioPcmAt = System.currentTimeMillis()
-                audioRecoveryWaitUntilAt = lastAudioPcmAt + AUDIO_RECOVERY_AFTER_MS
-                audioRecoveryWaitingForPcm = true
-                appendLog("AUDIO RECOVERY: handshake complete; WAITING FOR PCM")
-                addNetworkEvent("AUDIO RECOVERY: handshake complete; WAITING FOR PCM")
-            } catch (e: Exception) {
-                if (running) {
-                    appendLog("AUDIO RECOVERY FAILED: ${e.message}")
-                    addNetworkEvent("AUDIO RECOVERY FAILED: ${e.message}")
-                }
-            } finally {
-                audioRecoveryInProgress = false
-                if (audioRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS &&
-                    audioPcmPacketCount == 0L) {
-                    audioRecoveryPausedUntilAt =
-                        System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
-                    audioRecoveryWaitingForPcm = false
-                    appendLog("AUDIO RECOVERY: 3 attempts completed; pausing local recovery for 30 seconds")
-                    addNetworkEvent("AUDIO RECOVERY: paused for 30 seconds")
-                }
-            }
-        }.apply {
-            name = "IC705-Audio-Recovery"
-            isDaemon = true
-            start()
-        }
-    }
-
-    private fun recoverSpectrumStream() {
-        if (!running || !serialOpen || !scopeStarted || scopeRecoveryInProgress) {
-            return
-        }
-        if (System.currentTimeMillis() < scopeRecoveryPausedUntilAt) {
-            return
-        }
-        if (scopeRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS) {
-            scopeRecoveryPausedUntilAt = System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
-            scopeRecoveryWaitingForFrame = false
-            appendLog("SCOPE RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS failed attempts; waiting 30 seconds")
-            addNetworkEvent("SCOPE RECOVERY: paused after $MEDIA_RECOVERY_MAX_ATTEMPTS attempts")
-            return
-        }
-
-        scopeRecoveryInProgress = true
-        scopeRecoveryAttempt++
-        appendLog("SCOPE RECOVERY ATTEMPT #$scopeRecoveryAttempt")
-        addNetworkEvent("SCOPE RECOVERY ATTEMPT #$scopeRecoveryAttempt")
-
-        Thread {
-            try {
-                appendLog("SCOPE RECOVERY: restarting only the spectrum stream")
-
-                try {
-                    sendScopeCommand(
-                        byteArrayOf(
-                            0x27.toByte(),
-                            0x11.toByte(),
-                            0x00.toByte()
-                        )
-                    )
-                } catch (_: Exception) {
-                }
-
-                scopeStarted = false
-                scopeRecoveryAttempt = 0
-                scopeRecoveryPausedUntilAt = 0L
-                resetScopeAssembly()
-
-                Thread.sleep(250)
-
-                if (!running || !serialOpen) {
-                    return@Thread
-                }
-
-                startSpectrumScope()
-                lastScopeFrameAt = System.currentTimeMillis()
-                scopeRecoveryWaitUntilAt = lastScopeFrameAt + SCOPE_RECOVERY_AFTER_MS
-                scopeRecoveryWaitingForFrame = true
-
-                appendLog("SCOPE RECOVERY: restarted; WAITING FOR 27 00")
-                addNetworkEvent("SCOPE RECOVERY: restarted; WAITING FOR 27 00")
-            } catch (e: Exception) {
-                if (running) {
-                    appendLog("SCOPE RECOVERY FAILED: ${e.message}")
-                    addNetworkEvent("SCOPE RECOVERY FAILED: ${e.message}")
-                }
-            } finally {
-                scopeRecoveryInProgress = false
-                if (scopeRecoveryAttempt >= MEDIA_RECOVERY_MAX_ATTEMPTS &&
-                    scopeRaw27Frames == 0L) {
-                    scopeRecoveryPausedUntilAt =
-                        System.currentTimeMillis() + MEDIA_RECOVERY_PAUSE_MS
-                    scopeRecoveryWaitingForFrame = false
-                    appendLog("SCOPE RECOVERY: 3 attempts completed; pausing local recovery for 30 seconds")
-                    addNetworkEvent("SCOPE RECOVERY: paused for 30 seconds")
-                }
-            }
-        }.apply {
-            name = "IC705-Scope-Recovery"
-            isDaemon = true
-            start()
-        }
-    }
-
-    private fun updateNetworkQualityIndicator(
-        quality: Int,
-        status: String
-    ) {
-        if (!::networkQualityIndicator.isInitialized) {
-            return
-        }
-
-        val color =
-            when {
-                status == "GOOD" -> Color.rgb(0, 220, 0)
-                status == "FAIR" -> Color.YELLOW
-                else -> Color.RED
-            }
-
-        networkQualityIndicator.text = "●"
-        networkQualityIndicator.setTextColor(color)
-        networkQualityIndicator.contentDescription =
-            "Network quality: $quality percent, $status"
-    }
-
-    private fun stopNetworkWatchdog() {
-        try {
-            networkWatchdogScheduler?.shutdownNow()
-        } catch (_: Exception) {
-        }
-        networkWatchdogScheduler = null
-        networkWarningLogged = false
-    }
-
-    private fun stopSession() {
-        try {
-            stopSpectrumScope()
-        } catch (_: Exception) {
         }
 
 
@@ -5845,9 +5330,8 @@ class MainActivity : Activity() {
         }
         teardownStarted = true
         running = false
-        stopNetworkWatchdog()
         appendLog("")
-        appendLog("DISCONNECTING...")
+        appendLog(if (preserveScreen) "BACKGROUND RECOVERY: releasing old radio session..." else "DISCONNECTING...")
         scheduler?.shutdownNow()
         scheduler = null
         serialScheduler?.shutdownNow()
@@ -5912,7 +5396,8 @@ class MainActivity : Activity() {
                     audioLocalSid
                 )
 
-                writeBeInt(                    audioDisconnect,
+                writeBeInt(
+                    audioDisconnect,
                     12,
                     audioRemoteSid
                 )
@@ -5953,7 +5438,7 @@ class MainActivity : Activity() {
                 if (serialOpen) {
                     sendSerialTracked(buildSerialClose())
                     appendLog("Serial close sent")
-                    Thread.sleep(100)
+                    Thread.sleep(100L)
                 }
                 val serialDisconnect = ByteArray(16)
                 serialDisconnect[0] = 0x10.toByte()
@@ -5975,7 +5460,7 @@ class MainActivity : Activity() {
                     serialRemoteSid
                 )
                 sendSerialRaw(serialDisconnect)
-                Thread.sleep(50)
+                Thread.sleep(50L)
                 sendSerialRaw(serialDisconnect)
                 appendLog("Serial disconnect sent twice")
             } catch (e: Exception) {
@@ -6002,7 +5487,7 @@ class MainActivity : Activity() {
                         buildAuth(0x01)
                     sendTracked(deauth)
                     appendLog("De-auth sent")
-                    Thread.sleep(500)
+                    Thread.sleep(500L)
                 }
             } catch (e: Exception) {
                 appendLog(
@@ -6041,24 +5526,12 @@ class MainActivity : Activity() {
             }
         }
         connected = false
-        audioExpected = false
-        audioRecoveryInProgress = false
-        scopeRecoveryInProgress = false
-        audioRecoveryWaitingForPcm = false
-        scopeRecoveryWaitingForFrame = false
-        audioRecoveryAttempt = 0
-        scopeRecoveryAttempt = 0
-        lastAudioPcmAt = 0L
-        lastAudioRxAt = 0L
-        audioRxPacketCount = 0L
-        audioPcmPacketCount = 0L
-        audioPkt7RxCount = 0L
-        audioLocalPort = 0
-        lastScopeFrameAt = 0L
-        cleanupSocketOnly()
-        runOnUiThread {
-            connectButton.isEnabled = true
-            disconnectButton.isEnabled = false
+        audioStreamExpected = false
+        audioStreamExpectedSinceAtMs = 0L
+        cleanupSocketOnly(preserveScreen)
+        if (!preserveScreen) runOnUiThread {
+            updateConnectionButtons(connecting = false, isConnected = false)
+            updateLinkQuality(Long.MAX_VALUE, Long.MAX_VALUE)
             setFrequencyButton.isEnabled = false
             down500Button.isEnabled = false
             up500Button.isEnabled = false
@@ -6067,12 +5540,11 @@ class MainActivity : Activity() {
             usbButton.isEnabled = false
             lsbButton.isEnabled = false
             enableBandButtons(false)
-            updateConnectionButtonColors(false)
         }
         appendLog("Connection closed.")
         appendLog("")
     }
-    private fun cleanupSocketOnly() {
+    private fun cleanupSocketOnly(preserveScreen: Boolean = false) {
         stopSignalMeterPolling()
         stopScopePolling()
         try {
@@ -6082,7 +5554,6 @@ class MainActivity : Activity() {
         serialScheduler = null
 
         audioRunning = false
-        audioExpected = false
 
         try {
             audioScheduler?.shutdownNow()
@@ -6148,9 +5619,9 @@ class MainActivity : Activity() {
         }
         receiverThread = null
         serialReceiverThread = null
-        runOnUiThread {
-            connectButton.isEnabled = true
-            disconnectButton.isEnabled = false
+        if (!preserveScreen) runOnUiThread {
+            updateConnectionButtons(connecting = false, isConnected = false)
+            updateLinkQuality(Long.MAX_VALUE, Long.MAX_VALUE)
             if (::scopeToggleButton.isInitialized) {
                 scopeToggleButton.isEnabled = false
                 scopeToggleButton.text = "SPECTRUM ON"
@@ -6334,14 +5805,6 @@ class MainActivity : Activity() {
         Log.d("IC705Remote", "UI log cleared")
     }
 
-    private fun networkAge(ageMs: Long): String {
-        return if (ageMs == Long.MAX_VALUE) {
-            "N/A"
-        } else {
-            "${ageMs}ms"
-        }
-    }
-
     private fun appendLog(
         message: String
     ) {
@@ -6350,6 +5813,7 @@ class MainActivity : Activity() {
 
     private class SpectrumWaterfallView(context: Context) : View(context) {
         companion object { private const val WATERFALL_ROWS = 100 }
+        var onTuneFrequency: ((Long) -> Unit)? = null
         private val spectrumPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(0,255,180); style = Paint.Style.STROKE; strokeWidth = 3f }
         private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(55,70,75); style = Paint.Style.STROKE; strokeWidth = 1f }
         private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 18f; typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL) }
@@ -6359,67 +5823,47 @@ class MainActivity : Activity() {
         private val waterfall = java.util.ArrayDeque<IntArray>()
         @Volatile private var sensitivity = 1.0f
         @Volatile private var noiseFloor = 0
+        @Volatile private var waterfallPalette = 0
         @Volatile private var displayBandwidthKHz = 75
         @Volatile var centerFrequencyHz = 0L
         @Volatile private var totalSpanFrequencyHz = 100_000L
-        var onFrequencyTouch: ((Long) -> Unit)? = null
-        private var touchDownX = 0f
-        private var touchDownY = 0f
-        private var touchDownAt = 0L
         init { setBackgroundColor(Color.rgb(4,8,10)) }
-        fun clearScope() { synchronized(this) { spectrum=IntArray(356); waterfall.clear(); centerFrequencyHz=0L; totalSpanFrequencyHz=100_000L }; postInvalidate() }
-        fun setSensitivity(gain: Float) { sensitivity=gain.coerceIn(0.25f,4f); postInvalidate() }
-        fun setNoiseFloor(v:Int) { noiseFloor=v.coerceIn(0,120); postInvalidate() }
-        fun setDisplayBandwidthKHz(v:Int) { displayBandwidthKHz=v.coerceIn(5,1000); postInvalidate() }
-        fun updateSpectrum(centerHz:Long,totalSpanHz:Long,samples:IntArray) { centerFrequencyHz=centerHz; totalSpanFrequencyHz=if(totalSpanHz>0) totalSpanHz else 100_000L; synchronized(this){ spectrum=samples.copyOf(); if(waterfall.size>=WATERFALL_ROWS) waterfall.removeLast(); waterfall.addFirst(samples.copyOf()) }; postInvalidate() }
-        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
-            when (event.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    touchDownX = event.x
-                    touchDownY = event.y
-                    touchDownAt = System.currentTimeMillis()
-                    return true
-                }
-
-                android.view.MotionEvent.ACTION_UP -> {
-                    val dx = event.x - touchDownX
-                    val dy = event.y - touchDownY
-                    val elapsed = System.currentTimeMillis() - touchDownAt
-
-                    if (elapsed <= 700L &&
-                        kotlin.math.abs(dx) <= 40f &&
-                        kotlin.math.abs(dy) <= 40f &&
-                        width > 1 &&
-                        centerFrequencyHz > 0L &&
-                        totalSpanFrequencyHz > 0L
-                    ) {
-                        val fraction = (event.x / width.toFloat()).coerceIn(0f, 1f)
-                        val targetHz =
-                            centerFrequencyHz -
-                                    totalSpanFrequencyHz / 2L +
-                                    (fraction * totalSpanFrequencyHz.toDouble()).toLong()
-
-                        // Always resolve a touch to the nearest 1 kHz.
-                        val roundedHz = ((targetHz + 500L) / 1000L) * 1000L
-                        onFrequencyTouch?.invoke(roundedHz)
+        override fun performClick(): Boolean { super.performClick(); return true }
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> return true
+                MotionEvent.ACTION_UP -> {
+                    val center = centerFrequencyHz
+                    val widthPx = width.toFloat()
+                    if (center > 0L && widthPx > 0f && totalSpanFrequencyHz > 0L) {
+                        val visibleHz = minOf(displayBandwidthKHz.toLong() * 1000L, totalSpanFrequencyHz)
+                        val offsetHz = ((event.x / widthPx).coerceIn(0f, 1f) - 0.5f) * visibleHz
+                        val rawTarget = center + offsetHz.toLong()
+                        val tunedTarget = (((rawTarget + 500L) / 1000L) * 1000L).coerceAtLeast(1_000L)
+                        onTuneFrequency?.invoke(tunedTarget)
+                        performClick()
                     }
-
-                    performClick()
                     return true
                 }
-
-                android.view.MotionEvent.ACTION_CANCEL -> {
-                    return true
-                }
+                MotionEvent.ACTION_CANCEL -> return true
             }
             return true
         }
-
-        override fun performClick(): Boolean {
-            super.performClick()
-            return true
+        fun clearScope() { synchronized(this) { spectrum=IntArray(356); waterfall.clear(); centerFrequencyHz=0L; totalSpanFrequencyHz=100_000L }; postInvalidate() }
+        fun setSensitivity(gain: Float) { sensitivity=gain.coerceIn(0.25f,4f); postInvalidate() }
+        fun setNoiseFloor(v:Int) { noiseFloor=v.coerceIn(0,60); postInvalidate() }
+        fun setWaterfallPalette(index:Int) { waterfallPalette=index.coerceIn(0,4); postInvalidate() }
+        fun setDisplayBandwidthKHz(v:Int) { displayBandwidthKHz=v.coerceIn(5,1000); postInvalidate() }
+        fun updateSpectrum(centerHz:Long,totalSpanHz:Long,samples:IntArray) {
+            centerFrequencyHz=centerHz
+            totalSpanFrequencyHz=if(totalSpanHz>0) totalSpanHz else 100_000L
+            synchronized(this) {
+                spectrum=samples.copyOf()
+                if (waterfall.size >= WATERFALL_ROWS) waterfall.removeLast()
+                waterfall.addFirst(samples.copyOf())
+            }
+            postInvalidate()
         }
-
         override fun onDraw(canvas:Canvas){
             super.onDraw(canvas); val w=width.toFloat(); val h=height.toFloat(); if(w<=0f||h<=0f)return
             canvas.drawColor(Color.rgb(4,8,10)); val spectrumHeight=maxOf(140f,h*0.45f)
@@ -6440,89 +5884,36 @@ class MainActivity : Activity() {
                 canvas.drawLine(markerX, 40f, markerX, h, tunedFrequencyPaint)
             }
             canvas.drawLine(0f,spectrumHeight,w,spectrumHeight,gridPaint)
-            val rows=synchronized(this){waterfall.toList()}; val rowHeight=maxOf(1f,(h-spectrumHeight-2f)/WATERFALL_ROWS.toFloat())
+            val rows=synchronized(this){waterfall.toList()}
+            val rowHeight=maxOf(1f,(h-spectrumHeight-2f)/WATERFALL_ROWS.toFloat())
             for(r in rows.indices) drawWaterfallRow(canvas,rows[r],spectrumHeight+r*rowHeight,w,rowHeight)
         }
-
-        private fun drawWaterfallRow(
-            canvas: Canvas,
-            row: IntArray,
-            y: Float,
-            width: Float,
-            rowHeight: Float
-        ) {
-            if (row.isEmpty()) return
-            val denom = maxOf(1, 160 - noiseFloor)
-            for (i in row.indices) {
-                val adjusted = maxOf(0, row[i] - noiseFloor)
-                val level = ((adjusted.toFloat() / denom) * sensitivity)
-                    .coerceIn(0f, 1f)
-                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.rgb(
-                        (8 + 247 * level).toInt().coerceIn(0, 255),
-                        (12 + 180 * level * level).toInt().coerceIn(0, 255),
-                        (25 + 225 * level).toInt().coerceIn(0, 255)
-                    )
+        private fun drawWaterfallRow(canvas:Canvas,row:IntArray,y:Float,width:Float,rowHeight:Float){
+            if(row.isEmpty())return
+            val denom=maxOf(1,160-noiseFloor)
+            for(i in row.indices){
+                val adjusted=maxOf(0,row[i]-noiseFloor)
+                val level=((adjusted.toFloat()/denom)*sensitivity).coerceIn(0f,1f)
+                val color=when(waterfallPalette){
+                    1 -> Color.rgb((4+65*level).toInt(),(10+235*level).toInt(),(6+80*level).toInt())
+                    2 -> Color.rgb((10+245*level).toInt(),(4+175*level).toInt(),(2+30*level).toInt())
+                    3 -> Color.rgb((18+205*level).toInt(),(4+45*level).toInt(),(24+225*level).toInt())
+                    4 -> Color.rgb((12+243*level).toInt(),(12+243*level).toInt(),(12+243*level).toInt())
+                    else -> Color.rgb((3+35*level).toInt(),(8+205*level).toInt(),(25+230*level).toInt())
                 }
-                val x0 = i.toFloat() / row.size.toFloat() * width
-                val x1 = (i + 1).toFloat() / row.size.toFloat() * width
-                canvas.drawRect(
-                    x0,
-                    y,
-                    x1 + 1f,
-                    y + rowHeight + 1f,
-                    paint
-                )
+                val paint=Paint().apply{this.color=color}
+                val x0=i.toFloat()/row.size*width
+                val x1=(i+1).toFloat()/row.size*width
+                canvas.drawRect(x0,y,x1+1f,y+rowHeight+1f,paint)
             }
         }
-
-        private fun drawFrequencyLabels(
-            canvas: Canvas,
-            width: Float,
-            spectrumHeight: Float
-        ) {
-            val center = centerFrequencyHz
-            if (center <= 0L) return
-
-            val visibleHz = minOf(
-                displayBandwidthKHz.toLong() * 1000L,
-                totalSpanFrequencyHz
-            )
-
-            val left = formatMHz(center - visibleHz / 2L)
-            val mid = formatMHz(center)
-            val right = formatMHz(center + visibleHz / 2L)
-
-            canvas.drawText(
-                left,
-                6f,
-                spectrumHeight - 4f,
-                textPaint
-            )
-
-            val midWidth = textPaint.measureText(mid)
-            canvas.drawText(
-                mid,
-                width / 2f - midWidth / 2f,
-                spectrumHeight - 4f,
-                textPaint
-            )
-
-            val rightWidth = textPaint.measureText(right)
-            canvas.drawText(
-                right,
-                width - rightWidth - 6f,
-                spectrumHeight - 4f,
-                textPaint
-            )
-        }
-
-        private fun formatMHz(hz: Long): String {
-            return String.format(
-                java.util.Locale.US,
-                "%.6f",
-                hz / 1_000_000.0
-            )
-        }
+        private fun drawFrequencyLabels(canvas:Canvas,width:Float,spectrumHeight:Float){val center=centerFrequencyHz;if(center<=0L)return; val visibleHz=minOf(displayBandwidthKHz.toLong()*1000L,totalSpanFrequencyHz); val left=formatMHz(center-visibleHz/2); val mid=formatMHz(center); val right=formatMHz(center+visibleHz/2); canvas.drawText(left,6f,spectrumHeight-4f,textPaint); val mw=textPaint.measureText(mid); canvas.drawText(mid,width/2f-mw/2f,spectrumHeight-4f,textPaint); val rw=textPaint.measureText(right); canvas.drawText(right,width-rw-6f,spectrumHeight-4f,textPaint)}
+        private fun formatMHz(hz:Long):String=String.format(java.util.Locale.US,"%.6f",hz/1_000_000.0)
     }
+
+
 }
+
+
+
+
