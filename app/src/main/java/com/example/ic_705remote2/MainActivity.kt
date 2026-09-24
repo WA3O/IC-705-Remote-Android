@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 50177)
-Total output lines: 5935
-
 package com.example.ic_705remote2
 import android.app.Activity
 import android.app.AlertDialog
@@ -51,7 +48,7 @@ class MainActivity : Activity() {
     @Volatile private var automaticReconnectAttempts = 0
     @Volatile private var automaticReconnectRestoreScope = false
     companion object {
-        private const val APP_VERSION = "v28.19"
+        private const val APP_VERSION = "v28.20"
         private const val MAX_AUTO_RECONNECT_ATTEMPTS = 3
         private const val NETWORK_RECONNECT_DELAY_MS = 100L
         private const val STREAM_STALL_TIMEOUT_MS = 600L
@@ -292,6 +289,11 @@ class MainActivity : Activity() {
     private var modeReceived = false
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Lock the IC-705 Remote app to portrait orientation.
+        requestedOrientation =
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         title = "IC-705 Remote Control $APP_VERSION"
         buildUserInterface()
@@ -2865,7 +2867,26 @@ class MainActivity : Activity() {
                     (data[1].toInt() and 0xFF) == 0x00 &&
                     (data[2].toInt() and 0xFF) == 0x00 &&
                     (data[3].toInt() and 0xFF) == 0x00 &&
-                    (data[4].toInt() a…177 tokens truncated…        reply
+                    (data[4].toInt() and 0xFF) == 0x07 &&
+                    (data[5].toInt() and 0xFF) == 0x00 &&
+                    (data[16].toInt() and 0xFF) == 0x00
+                ) {
+                    val reply =
+                        buildAudioPkt7Reply(
+                            readLeShort(
+                                data,
+                                6
+                            ),
+                            data.copyOfRange(
+                                17,
+                                21
+                            )
+                        )
+
+                    recordAudioPacket(
+                        "TX",
+                        "PKT7 REPLY DURING PKT6 WAIT",
+                        reply
                     )
 
                     sendAudioRaw(reply)
@@ -3748,12 +3769,35 @@ class MainActivity : Activity() {
     }
 
     private fun sendScopeCommand(
-        civ: ByteArray
+        command: ByteArray
     ) {
         if (!running || !serialOpen) {
             return
         }
 
+        // Scope toggles/mode selections are CI-V command bodies (27 xx ...),
+        // while the bandwidth builder already returns a complete CI-V frame.
+        // Match the tester: wrap command bodies in FE FE A4 E0 ... FD before
+        // placing them in the serial C1 transport envelope.
+        val isCompleteCivFrame = command.size >= 6 &&
+                (command[0].toInt() and 0xFF) == 0xFE &&
+                (command[1].toInt() and 0xFF) == 0xFE &&
+                (command[2].toInt() and 0xFF) == 0xA4 &&
+                (command[3].toInt() and 0xFF) == 0xE0 &&
+                (command.last().toInt() and 0xFF) == 0xFD
+        val civ = if (isCompleteCivFrame) {
+            command
+        } else {
+            ByteArray(command.size + 5).also { frame ->
+                frame[0] = 0xFE.toByte()
+                frame[1] = 0xFE.toByte()
+                frame[2] = 0xA4.toByte()
+                frame[3] = 0xE0.toByte()
+                command.copyInto(frame, 4)
+                frame[frame.lastIndex] = 0xFD.toByte()
+            }
+        }
+        appendLog("SCOPE CI-V TX: ${hex(civ)}")
         sendSerialTracked(
             buildCivPacket(civ)
         )
@@ -5913,7 +5957,3 @@ class MainActivity : Activity() {
 
 
 }
-
-
-
-
