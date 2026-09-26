@@ -23,14 +23,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
 
-    sourceSets {
-        getByName("main") {
-            java {
-                exclude("**/MainActivity_v*.kt")
-            }
-        }
-    }
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    exclude("**/MainActivity_v*.kt")
 }
 
 dependencies {
