@@ -1,13 +1,19 @@
 # IC-705 Remote Android
 
-## Current checkpoint: v28.41
+## Current milestone: v28.45
 
-[Complete v28.41 project and source](checkpoints/v28.41/) | [Restore instructions](checkpoints/v28.41/README.md) | [Complete feature guide](FEATURES.md) | [Full changelog](CHANGELOG.md)
+[Complete project and restore instructions](checkpoints/v28.45/) | [Feature guide](FEATURES.md) | [Changelog](CHANGELOG.md)
 
-v28.41 renews authentication every minute to address the observed roughly 92-second audio/spectrum interruption. The live test recorded 17 successful renewals over 17 minutes 18 seconds, no recovery events, and no audible breakups reported by the user.
+Enter MHz in the bright-green top field, e.g. **12.200000 MHz**, and tap the
+keyboard check mark / Done to tune. Includes the large TX control and 180-second
+countdown, Functions controls, phone-button PTT and experimental BLE button support.
+The v28.41 authentication-renewal/audio fix is preserved.
 
-Includes receive audio, spectrum/waterfall, frequency and band controls, microphone TX with a 180-second limit, power/microphone/squelch sliders, LAN/WAN settings and four locally saved web links. Fresh-install connection fields and links are blank. The separate v28.38 marker-spacing experiment is not included.
+The milestone contains the complete desktop project, including all Gradle build
+files and wrapper, without private keys, machine-specific settings or caches.
+Fresh-install connection credentials, addresses and web links are blank.
+BLE support needs physical-device verification; details are in the feature guide.
 
-This checkpoint preserves the complete current project/source and excludes private keys and machine-specific files. See restore instructions for local SDK and signing configuration. It contains no installable APK. Earlier published releases remain under [Releases](https://github.com/WA3O/IC-705-Remote-Android/releases).
-
-Historical source alternatives outside the checkpoint project are archival and must not be compiled together as duplicate classes.
+The root project is the lightweight GitHub Actions build. The exact Android Studio
+project is under `checkpoints/v28.45/project`. Earlier checkpoints are preserved.
+[Earlier releases](https://github.com/WA3O/IC-705-Remote-Android/releases).
