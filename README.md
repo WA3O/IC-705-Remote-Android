@@ -1,16 +1,13 @@
 # IC-705-Remote-Android
 
-## Latest source release: v28.37
+## Latest source release: v28.40
 
-[Download v28.37](https://github.com/WA3O/IC-705-Remote-Android/releases/tag/v28.37) | [View complete source](checkpoints/v28.37/MainActivity.kt) | [Changelog](CHANGELOG.md)
+[Download v28.40](https://github.com/WA3O/IC-705-Remote-Android/releases/tag/v28.40) | [Complete source](checkpoints/v28.40/MainActivity.kt) | [Copy-and-paste text](checkpoints/v28.40/MainActivity.txt) | [Full changelog](CHANGELOG.md)
 
-Includes radio wake/standby controls, LAN/WAN selection, startup data status,
-horizontal swipe tuning and spectrum/waterfall display refinements.
+Includes microphone TX, a red TX toggle with a 180-second limit, power/microphone/squelch sliders, four saved web links, ASCII labels, and quiet automatic stream recovery. Retains LAN/WAN selection, wake/standby controls, swipe tuning and v28.37 display behavior.
 
-The later v28.38 span-dependent marker-spacing change is documented in the
-changelog as an unreleased follow-up and is not included in v28.37.
+This is a source release, not an APK or full Android Studio project. Replace your existing MainActivity.kt; keep RECORD_AUDIO and INTERNET permissions. See the [release instructions](checkpoints/v28.40/README.md) and included basic manifest. Historical source files are archival alternatives, not additional classes to compile together.
 
-This is Kotlin source, not an APK or complete Android Studio project. Restore
-instructions and a checksum are in the [v28.37 source folder](checkpoints/v28.37/README.md).
-Earlier milestones remain in [checkpoints](checkpoints/), including
-[v28.31](checkpoints/v28.31/README.md) and [v28.30](checkpoints/v28.30/README.md).
+The Android debug build and all five existing unit tests passed. The user confirmed microphone operation; live radio recovery remains untested. The separate v28.38 marker-spacing experiment is documented in the changelog and is not included.
+
+Earlier releases and checkpoints remain available.

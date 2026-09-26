@@ -1,6 +1,28 @@
 # Changelog
 
-This log covers the changes developed in this task, with earlier release context from GitHub. The selected release is **v28.37**. The later v28.38 change below is documented but is **not included** in v28.37.
+Development history through **v28.40**, released September 25, 2026. v28.39 and v28.40 extend v28.37; the separate v28.38 marker-spacing experiment remains excluded.
+
+## v28.40 — Current source release
+
+- Replaced garbled TX labels with ASCII: TX / STOP, WAIT / STOP, STOPPING, and Power out: waiting...; connection/startup labels also use ASCII.
+- Added WEB LINKS as a third Settings tab alongside IP / PASSWORD and RADIO SETTINGS.
+- Added four website addresses, optional names, automatic local saving, and individual Open buttons. Addresses without a scheme use HTTPS; invalid addresses show an inline error.
+- Opening a website uses the browser. Leaving the app stops TX; returning never resumes TX automatically.
+- Automatic network recovery no longer restarts the yellow startup banner or opens a connection dialog. Manual CONNECT retains elapsed-time and audio/waterfall startup feedback.
+- Failed automatic reconnection restores CONNECT and displays a brief connection-lost message. Existing audio-only recovery and diagnostic logging remain.
+- Preserved the working microphone/TX implementation, red TX toggle, 180-second automatic TX stop, sliders, LAN/WAN settings and v28.37 display behavior.
+- Android debug build passed; all five existing unit tests passed (four TX protocol tests and one existing project test). Live radio recovery was not tested during preparation.
+
+## v28.39 — Microphone TX and radio controls
+
+- Added a main-panel TX toggle beside CONNECT/DISCONNECT, red while selected, with radio TX-status confirmation and a second tap to request RX.
+- Added Android microphone permission and 48 kHz mono PCM16 microphone streaming over WLAN. Temporarily selects WLAN modulation for DATA and non-DATA modes and restores the original radio routing after TX.
+- Added a 180-second TX limit, plus stop requests on app backgrounding, disconnect, microphone failure, recovery and loss of TX status. TX never automatically resumes.
+- Added RADIO SETTINGS with requested power from 0 to 10 W in 0.1 W steps, microphone audio from 0 to 100%, and squelch from 0 to 100%. Zero power inhibits app TX; zero microphone level mutes outgoing audio.
+- Saves slider values locally; applies power and squelch with radio readback. Power and squelch are disabled during TX; microphone level remains adjustable.
+- Mutes phone receive playback during TX and changes the S-meter to the radio's relative power-output percentage. This is not a calibrated watts measurement.
+- Supports phone voice TX in LSB, USB, AM and FM. Temporarily sets WLAN MOD level to 50% and restores it after TX.
+- User confirmed that the microphone fix works. Android compilation and TX protocol tests passed during development.
 
 ## v28.38 — Unreleased follow-up
 
@@ -8,7 +30,7 @@ This log covers the changes developed in this task, with earlier release context
 - Removed the fixed ten-division vertical background grid to avoid conflicting with frequency markers.
 - Retained the green tuned-frequency marker and v28.37 font size.
 
-## v28.37 — Selected source release
+## v28.37 — Previous source release
 
 - Reduced spectrum/waterfall frequency-label size by 50%, from 25.2 to 12.6 pixels.
 - Retained all changes through v28.36. Frequency markers remain spaced every 10 kHz in this release; overlapping labels may be omitted.
@@ -67,8 +89,8 @@ This log covers the changes developed in this task, with earlier release context
 
 ## Installation and validation
 
-This is a Kotlin source release, not an APK or complete Android Studio project. Replace the contents of the existing MainActivity.kt and rebuild; do not add a second class with the same name. Package: com.example.ic_705remote2. If Gradle defines versionName/versionCode, update those separately.
+This is a complete Kotlin source release, not a full Android Studio project or installable APK. Replace the entire existing MainActivity.kt with the supplied .kt or identical .txt; do not add a duplicate class. Package: com.example.ic_705remote2. Retain INTERNET and add RECORD_AUDIO permission plus the optional microphone feature shown in the included basic AndroidManifest.xml. Preserve your project's other manifest settings. If used, set Gradle versionName to 28.40 and versionCode to 2840.
 
-For wake/standby, use SET > Function > Power OFF Setting (for Remote Control) > Standby/Shutdown and keep WLAN/Network Control enabled. The radio must remain network-reachable. LAN/WAN selection does not configure a router or VPN.
+The delivered v28.40 source compiled successfully and all five existing unit tests passed. User feedback confirms microphone operation; live radio recovery and the physical TX timeout have not been verified in this publication task. Actual RF output depends on radio mode, supply and hardware limits. RX and routing restoration commands require a reachable radio.
 
-User feedback confirmed working behavior during development. Source-level checks were performed; no additional Android compilation or physical-radio test was performed while preparing this release. No new code changes were made to the delivered v28.37 source for publication.
+For wake/standby, select SET > Function > Power OFF Setting (for Remote Control) > Standby/Shutdown and keep WLAN/Network Control enabled. LAN/WAN selection does not configure a router or VPN.

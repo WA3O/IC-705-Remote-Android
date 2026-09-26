@@ -1,0 +1,10 @@
+Android debug build: PASSED (offline assembleDebug).
+Existing unit tests: PASSED (offline testDebugUnitTest).
+com.example.ic_705remote2.ExampleUnitTest: 1 tests, 0 failures, 0 errors
+com.example.ic_705remote2.TxWireTest: 4 tests, 0 failures, 0 errors
+
+TX method comparison: only requested label changes.
+Complete .txt and .kt files: byte-identical UTF-8.
+Microphone permission retained.
+Live radio and phone recovery have not been tested.
+Build warnings: existing deprecated Android UI APIs and unavailable optional analytics settings; neither blocked the build.
