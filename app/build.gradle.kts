@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.ic_705remote2"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2840
-        versionName = "28.40"
+        versionCode = 2841
+        versionName = "28.41"
     }
 
     compileOptions {
