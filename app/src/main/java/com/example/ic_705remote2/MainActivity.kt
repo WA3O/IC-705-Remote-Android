@@ -3463,7 +3463,1458 @@ class MainActivity : Activity() {
                     DatagramPacket(
                         buffer,
                         buffer.size
-                size >= 9) {
+                    )
+
+                socket.receive(packet)
+
+                val data =
+                    packet.data.copyOf(
+                        packet.length
+                    )
+
+                if (data.size <= 32) {
+                    recordAudioPacket(
+                        "RX",
+                        "PKT6 WAIT",
+                        data
+                    )
+                }
+
+                // Exact IC-705 / RS-BA1 PKT6 response:
+                // 10 00 00 00 06 00 01 00 ...
+                if (
+                    data.size == 16 &&
+                    (data[0].toInt() and 0xFF) == 0x10 &&
+                    (data[1].toInt() and 0xFF) == 0x00 &&
+                    (data[2].toInt() and 0xFF) == 0x00 &&
+                    (data[3].toInt() and 0xFF) == 0x00 &&
+                    (data[4].toInt() and 0xFF) == 0x06 &&
+                    (data[5].toInt() and 0xFF) == 0x00 &&
+                    (data[6].toInt() and 0xFF) == 0x01 &&
+                    (data[7].toInt() and 0xFF) == 0x00
+                ) {
+                    appendLog(
+                        "EXACT PKT6 MATCH FOUND"
+                    )
+                    return data
+                }
+
+                // IC-705 PKT7 request. Reply immediately exactly as
+                // kappanhang does, then keep waiting for PKT6.
+                if (
+                    data.size == 21 &&
+                    (data[1].toInt() and 0xFF) == 0x00 &&
+                    (data[2].toInt() and 0xFF) == 0x00 &&
+                    (data[3].toInt() and 0xFF) == 0x00 &&
+                    (data[4].toInt() and 0xFF) == 0x07 &&
+                    (data[5].toInt() and 0xFF) == 0x00 &&
+                    (data[16].toInt() and 0xFF) == 0x00
+                ) {
+                    val reply =
+                        buildAudioPkt7Reply(
+                            readLeShort(
+                                data,
+                                6
+                            ),
+                            data.copyOfRange(
+                                17,
+                                21
+                            )
+                        )
+
+                    recordAudioPacket(
+                        "TX",
+                        "PKT7 REPLY DURING PKT6 WAIT",
+                        reply
+                    )
+
+                    sendAudioRaw(reply)
+
+                    continue
+                }
+
+            } catch (
+                _: java.net.SocketTimeoutException
+            ) {
+                // Keep looping until the full deadline.
+            }
+        }
+
+        return null
+    }
+
+    private fun receiveAudioExpected(
+        expectedLength: Int,
+        timeoutMs: Int,
+        matcher: (ByteArray) -> Boolean
+    ): ByteArray? {
+        val socket =
+            audioSocket
+                ?: return null
+
+        val deadline =
+            System.currentTimeMillis() +
+                    timeoutMs
+
+        val buffer =
+            ByteArray(1600)
+
+        while (
+            running &&
+            System.currentTimeMillis() < deadline
+        ) {
+            val remaining =
+                deadline -
+                        System.currentTimeMillis()
+
+            if (remaining <= 0) {
+                break
+            }
+
+            try {
+                socket.soTimeout =
+                    minOf(
+                        SOCKET_TIMEOUT_MS,
+                        remaining.toInt()
+                    )
+
+                val packet =
+                    DatagramPacket(
+                        buffer,
+                        buffer.size
+                    )
+
+                socket.receive(packet)
+
+                val data =
+                    packet.data.copyOf(
+                        packet.length
+                    )
+
+                if (data.size <= 32) {
+                    recordAudioPacket(
+                        "RX",
+                        "HANDSHAKE",
+                        data
+                    )
+                }
+
+                if (
+                    data.size == expectedLength &&
+                    matcher(data)
+                ) {
+                    return data
+                }
+
+                if (
+                    data.size == 21 &&
+                    (data[4].toInt() and 0xFF) == 0x07 &&
+                    (data[5].toInt() and 0xFF) == 0x00
+                ) {
+                    val direction =
+                        data[16].toInt() and 0xFF
+
+                    if (direction == 0x00) {
+                        try {
+                            sendAudioRaw(
+                                buildAudioPkt7Reply(
+                                    readLeShort(
+                                        data,
+                                        6
+                                    ),
+                                    data.copyOfRange(
+                                        17,
+                                        21
+                                    )
+                                )
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            } catch (
+                _: java.net.SocketTimeoutException
+            ) {
+            }
+        }
+
+        return null
+    }
+
+    private fun beginAudioStreamRecovery(reason: String) {
+        cancelTransmit("Audio stream recovery")
+        if (!running || userDisconnectRequested || !connected || !audioStreamExpected) return
+        if (!audioRecoveryGuard.compareAndSet(false, true)) return
+        audioRecoveryNotBeforeMs = System.currentTimeMillis() + AUDIO_RECOVERY_RETRY_COOLDOWN_MS
+        appendLog("AUDIO RECOVERY: $reason; restarting UDP audio only, keeping radio control and spectrum session alive.")
+        Thread {
+            var recovered = false
+            try {
+                audioRunning = false
+                audioScheduler?.shutdownNow()
+                audioScheduler = null
+                val oldSocket = audioSocket
+                if (oldSocket != null && !oldSocket.isClosed && audioLocalSid != 0 && audioRemoteSid != 0) {
+                    try {
+                        val disconnect = ByteArray(16)
+                        disconnect[0] = 0x10
+                        disconnect[4] = 0x05
+                        writeBeInt(disconnect, 8, audioLocalSid)
+                        writeBeInt(disconnect, 12, audioRemoteSid)
+                        oldSocket.send(DatagramPacket(disconnect, disconnect.size))
+                    } catch (_: Exception) { }
+                }
+                try { oldSocket?.close() } catch (_: Exception) { }
+                audioSocket = null
+                try { audioReceiverThread?.join(200L) } catch (_: InterruptedException) { }
+                audioReceiverThread = null
+                try { audioTrack?.pause() } catch (_: Exception) { }
+                try { audioTrack?.flush() } catch (_: Exception) { }
+                try { audioTrack?.stop() } catch (_: Exception) { }
+                try { audioTrack?.release() } catch (_: Exception) { }
+                audioTrack = null
+                audioHaveSequence = false
+                resetReceiveSequenceState(audioReceiveSequenceState)
+                if (!running) return@Thread
+                openAudioReceive(activeRadioIp, fastRecovery = true)
+                recovered = audioRunning
+                if (recovered) appendLog("AUDIO RECOVERY: audio stream re-established without disconnecting the radio control session.")
+            } catch (e: Exception) {
+                if (running) appendLog("AUDIO RECOVERY: quick restart failed: ${e.message}; another audio-only retry will follow.")
+            } finally {
+                if (!recovered) {
+                    audioRunning = false
+                    try { audioSocket?.close() } catch (_: Exception) { }
+                    audioSocket = null
+                    try { audioTrack?.release() } catch (_: Exception) { }
+                    audioTrack = null
+                }
+                audioRecoveryGuard.set(false)
+            }
+        }.apply {
+            name = "IC705-Audio-Recovery"
+            isDaemon = true
+            start()
+        }
+    }
+
+    // Recreate the UDP session when Android invalidates its active Wi-Fi route.
+    private fun handleUdpSendFailure(stream: String, error: Exception) {
+        if (!running) return
+        val detail = error.message.orEmpty()
+        if (!detail.contains("EPERM", ignoreCase = true) &&
+            !detail.contains("Operation not permitted", ignoreCase = true)
+        ) return
+        if (stream.equals("audio", ignoreCase = true)) {
+            beginAudioStreamRecovery("Android blocked audio UDP send (EPERM)")
+            return
+        }
+        beginNetworkRecovery("Android blocked $stream UDP send (EPERM)")
+    }
+
+    // A failed reconnect must release the preserved CONNECTED controls so the
+    // user can retry. Temporary recoveries never show a connection dialog.
+    private fun showRecoveryFailure() {
+        runOnUiThread {
+            if (userDisconnectRequested || running || connected) return@runOnUiThread
+            updateConnectionButtons(connecting = false, isConnected = false)
+            updateLinkQuality(Long.MAX_VALUE, Long.MAX_VALUE)
+            setTuneControlsEnabled(false)
+            enableBandButtons(false)
+            usbButton.isEnabled = false
+            lsbButton.isEnabled = false
+            scopeToggleButton.isEnabled = false
+            android.widget.Toast.makeText(this,
+                "Connection lost. Check the network, then press CONNECT.",
+                android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun beginNetworkRecovery(reason: String) {
+        cancelTransmit("Network recovery")
+        if (!running || userDisconnectRequested) return
+        if (!udpRecoveryGuard.compareAndSet(false, true)) return
+
+        automaticReconnectRestoreScope = scopeStarted
+        appendLog(
+            "NETWORK RECOVERY: $reason; stall threshold=${STREAM_STALL_TIMEOUT_MS} ms, " +
+                    "reconnect pause=${NETWORK_RECONNECT_DELAY_MS} ms; releasing the old radio session."
+        )
+        running = false
+        Thread({
+            try {
+                stopSession(preserveScreen = true)
+            } catch (e: Exception) {
+                appendLog("NETWORK RECOVERY: cleanup warning: ${e.message}")
+            }
+
+            if (automaticReconnectAttempts >= MAX_AUTO_RECONNECT_ATTEMPTS) {
+                appendLog("NETWORK RECOVERY: stopped after $MAX_AUTO_RECONNECT_ATTEMPTS attempts. Restore Wi-Fi, then press CONNECT.")
+                udpRecoveryGuard.set(false)
+                if (!userDisconnectRequested) showRecoveryFailure()
+                return@Thread
+            }
+
+            automaticReconnectAttempts++
+            val attempt = automaticReconnectAttempts
+            try {
+                Thread.sleep(NETWORK_RECONNECT_DELAY_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            udpRecoveryGuard.set(false)
+            if (!running && !userDisconnectRequested) {
+                appendLog("NETWORK RECOVERY: reconnect attempt $attempt/$MAX_AUTO_RECONNECT_ATTEMPTS")
+                startSession(preserveScreen = true)
+            }
+        }, "IC705-Network-Recovery").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun sendAudioRaw(
+        data: ByteArray
+    ) {
+        val socket =
+            audioSocket
+                ?: throw Exception(
+                    "Audio socket is closed."
+                )
+
+        synchronized(sendLock) {
+            val packet =
+                DatagramPacket(
+                    data,
+                    data.size
+                )
+
+            try {
+                socket.send(packet)
+            } catch (e: Exception) {
+                handleUdpSendFailure("audio", e)
+                throw e
+            }
+        }
+    }
+
+    // =================================================================
+    // OPERATING MODE
+    // IC-705 CI-V command 06:
+    // FE FE A4 E0 06 <MODE> <FILTER> FD
+    //
+    // Icom IC-705 codes:
+    //   LSB = 00
+    //   USB = 01
+    // FIL1 = 01
+    // =================================================================
+
+    private fun updateModeButtons(
+        modeCode: Int
+    ) {
+        runOnUiThread {
+            val activeTint =
+                ColorStateList.valueOf(
+                    Color.rgb(0, 190, 0)
+                )
+
+            // The unchecked sideband button uses the same surface as band buttons.
+            val inactiveTint = ColorStateList.valueOf(Color.rgb(36, 45, 53))
+
+            when (modeCode) {
+                0x01 -> {
+                    usbButton.text = "USB  ✓"
+                    lsbButton.text = "LSB"
+                    usbButton.backgroundTintList = activeTint
+                    lsbButton.backgroundTintList = inactiveTint
+                }
+
+                0x00 -> {
+                    usbButton.text = "USB"
+                    lsbButton.text = "LSB  ✓"
+                    usbButton.backgroundTintList = inactiveTint
+                    lsbButton.backgroundTintList = activeTint
+                }
+
+                else -> {
+                    usbButton.text = "USB"
+                    lsbButton.text = "LSB"
+                    usbButton.backgroundTintList = inactiveTint
+                    lsbButton.backgroundTintList = inactiveTint
+                }
+            }
+        }
+    }
+
+    private fun modeNameFromCode(
+        modeCode: Int
+    ): String {
+        return when (modeCode) {
+            0x00 -> "LSB"
+            0x01 -> "USB"
+            0x02 -> "AM"
+            0x03 -> "CW"
+            0x04 -> "RTTY"
+            0x05 -> "FM"
+            0x06 -> "WFM"
+            0x07 -> "CW-R"
+            0x08 -> "RTTY-R"
+            0x17 -> "DV"
+            else -> "UNKNOWN"
+        }
+    }
+
+    private fun setOperatingModeFromUi(
+        modeName: String,
+        modeCode: Int
+    ) {
+        if (!running || !serialOpen) {
+            appendLog(
+                "ERROR: CI-V serial stream is not open."
+            )
+            return
+        }
+
+        val civ =
+            byteArrayOf(
+                0xFE.toByte(),
+                0xFE.toByte(),
+                0xA4.toByte(),
+                0xE0.toByte(),
+                0x06.toByte(),
+                modeCode.toByte(),
+                0x01.toByte(),
+                0xFD.toByte()
+            )
+
+        appendLog("")
+        appendLog("MODE CHANGE REQUEST: $modeName")
+        appendLog(
+            "CI-V TX MODE: ${hex(civ)}"
+        )
+
+        try {
+            sendSerialTracked(
+                buildCivPacket(civ)
+            )
+
+            appendLog(
+                "CI-V MODE COMMAND SENT: $modeName"
+            )
+
+            modeReceived = false
+
+            // Ask the IC-705 for the selected VFO mode so the serial
+            // response is visible and we verify the command path.
+            Thread {
+                try {
+                    Thread.sleep(150)
+
+                    if (!running || !serialOpen) {
+                        return@Thread
+                    }
+
+                    sendCivReadMode()
+
+                } catch (e: Exception) {
+                    if (running) {
+                        appendLog(
+                            "MODE READBACK ERROR: ${e.message}"
+                        )
+                    }
+                }
+            }.start()
+
+        } catch (e: Exception) {
+            appendLog(
+                "MODE CHANGE FAILED: ${e.message}"
+            )
+            appendLog(
+                "Closing IC-705 connection."
+            )
+            stopSession()
+        }
+    }
+
+    private fun sendCivReadMode() {
+        // CI-V 26 00 = read selected/main VFO mode.
+        val civ =
+            byteArrayOf(
+                0xFE.toByte(),
+                0xFE.toByte(),
+                0xA4.toByte(),
+                0xE0.toByte(),
+                0x26.toByte(),
+                0x00.toByte(),
+                0xFD.toByte()
+            )
+
+        appendLog(
+            "CI-V TX MODE READ: ${hex(civ)}"
+        )
+
+        sendSerialTracked(
+            buildCivPacket(civ)
+        )
+    }
+
+    private fun sendCivSetFrequency(hz: Long) {
+        val civ = ByteArray(12)
+        civ[0] = 0xFE.toByte()
+        civ[1] = 0xFE.toByte()
+        civ[2] = 0xA4.toByte()
+        civ[3] = 0xE0.toByte()
+        civ[4] = 0x25.toByte()
+        civ[5] = 0x00
+        encodeIcomFrequency(hz, civ, 6)
+        civ[11] = 0xFD.toByte()
+
+        appendLog("CI-V TX SET MAIN VFO: ${hex(civ)}")
+        appendLog("CI-V WRITE COMMAND: 25 00")
+
+        sendSerialTracked(
+            buildCivPacket(civ)
+        )
+    }
+    private fun encodeIcomFrequency(
+        hz: Long,
+        output: ByteArray,
+        offset: Int
+    ) {
+        var value = hz
+        for (i in 0 until 5) {
+            val twoDigits = (value % 100L).toInt()
+            val low = twoDigits % 10
+            val high = twoDigits / 10
+            output[offset + i] =
+                ((high shl 4) or low).toByte()
+            value /= 100L
+        }
+        if (value != 0L) {
+            throw IllegalArgumentException(
+                "Frequency does not fit the 5-byte CI-V BCD field."
+            )
+        }
+    }
+    private fun sendCivReadFrequency() {
+        val civ = byteArrayOf(
+            0xFE.toByte(),
+            0xFE.toByte(),
+            0xA4.toByte(),
+            0xE0.toByte(),
+            0x03.toByte(),
+            0xFD.toByte()
+        )
+        appendLog("CI-V TX: ${hex(civ)}")
+        sendSerialTracked(buildCivPacket(civ))
+    }
+    @Synchronized
+    private fun buildCivPacket(
+        civ: ByteArray
+    ): ByteArray {
+        if (civ.isEmpty() || civ.size > 0xFFFF) {
+            throw IllegalArgumentException(
+                "Invalid CI-V frame length: ${civ.size}"
+            )
+        }
+
+        // Icom Ethernet / RS-BA1 CI-V data packet:
+        // 0x00..0x03  total packet length, little-endian
+        // 0x08..0x0B  sender SID, big-endian
+        // 0x0C..0x0F  receiver SID, big-endian
+        // 0x10        C1 transport type
+        // 0x11..0x12  CI-V length, little-endian
+        // 0x13..0x14  CI-V sequence, big-endian
+        // 0x15..      CI-V bytes
+        val packet =
+            ByteArray(
+                21 + civ.size
+            )
+
+        writeLeInt(
+            packet,
+            0,
+            packet.size
+        )
+
+        writeBeInt(
+            packet,
+            8,
+            serialLocalSid
+        )
+
+        writeBeInt(
+            packet,
+            12,
+            serialRemoteSid
+        )
+
+        packet[16] =
+            0xC1.toByte()
+
+        writeLeShort(
+            packet,
+            17,
+            civ.size
+        )
+
+        packet[19] =
+            ((serialCivSequence ushr 8) and 0xFF).toByte()
+
+        packet[20] =
+            (serialCivSequence and 0xFF).toByte()
+
+        serialCivSequence =
+            (serialCivSequence + 1) and 0xFFFF
+
+        System.arraycopy(
+            civ,
+            0,
+            packet,
+            21,
+            civ.size
+        )
+
+        return packet
+    }
+
+    private fun startSerialReceiverThread() {
+        if (serialReceiverThread?.isAlive == true) {
+            return
+        }
+        serialReceiverThread = Thread {
+            serialReceiverLoop()
+        }
+        serialReceiverThread?.start()
+    }
+    private fun serialReceiverLoop() {
+        val buffer = ByteArray(4096)
+        while (running) {
+            val socket = serialSocket ?: break
+            try {
+                val packet = DatagramPacket(
+                    buffer,
+                    buffer.size
+                )
+                socket.receive(packet)
+                val data =
+                    packet.data.copyOf(packet.length)
+                processSerialIncomingPacket(data)
+            } catch (e: java.net.SocketTimeoutException) {
+            } catch (e: Exception) {
+                if (running) {
+                    appendLog("SERIAL RECEIVE ERROR: ${e.message}")
+                }
+                break
+            }
+        }
+    }
+    private fun processSerialIncomingPacket(
+        data: ByteArray
+    ) {
+        if (data.size < 8) {
+            return
+        }
+
+        val byte4 =
+            data[4].toInt() and 0xFF
+        val byte5 =
+            data[5].toInt() and 0xFF
+
+        if (
+            data.size == 21 &&
+            byte4 == 0x07 &&
+            byte5 == 0x00
+        ) {
+            val direction =
+                data[16].toInt() and 0xFF
+
+            if (direction == 0x00) {
+                try {
+                    sendSerialRaw(
+                        buildSerialPkt7Reply(
+                            readLeShort(data, 6),
+                            data.copyOfRange(17, 21)
+                        )
+                    )
+                } catch (e: Exception) {
+                    if (running) {
+                        appendLog(
+                            "SERIAL PKT7 reply error: ${e.message}"
+                        )
+                    }
+                }
+            }
+            return
+        }
+
+        if (
+            data.size >= 16 &&
+            data[0].toInt() and 0xFF == 0x10 &&
+            byte4 == 0x01 &&
+            byte5 == 0x00
+        ) {
+            val requestedSeq =
+                readLeShort(data, 6)
+            retransmitSerial(requestedSeq)
+            return
+        }
+
+        if (
+            data.size >= 22 &&
+            (data[16].toInt() and 0xFF) == 0xC1
+        ) {
+            noteIncomingSequence(serialReceiveSequenceState, readLeShort(data, 6))
+            scopeTransportPackets++
+            scopeLastTransportAtMs = System.currentTimeMillis()
+            scopeLastUdpBytes = data.size
+
+            val payloadStart = 21
+            val available = data.size - payloadStart
+            if (available <= 0 || data.size < 19) return
+
+            val declaredLength = readLeShort(data, 17)
+            if (declaredLength <= 0 || declaredLength > available) {
+                appendLog("SERIAL C1 invalid length: declared=$declaredLength available=$available udp=${data.size}")
+                return
+            }
+
+            val chunk = data.copyOfRange(payloadStart, payloadStart + declaredLength)
+            collectPowerReplies(chunk)
+            scopeLastCivBytes = chunk.size
+
+            // IC-705 WLAN scope: raw 27 00 ... FD record embedded anywhere in C1.
+            var marker = -1
+            for (i in 0 until maxOf(0, chunk.size - 2)) {
+                if ((chunk[i].toInt() and 0xFF) == 0x27 &&
+                    (chunk[i + 1].toInt() and 0xFF) == 0x00 &&
+                    (chunk[i + 2].toInt() and 0xFF) == 0x00) {
+                    marker = i
+                    break
+                }
+            }
+            if (marker >= 0) {
+                var fd = -1
+                for (i in marker + 3 until chunk.size) {
+                    if ((chunk[i].toInt() and 0xFF) == 0xFD) { fd = i; break }
+                }
+                if (fd > marker) {
+                    val rawScope = chunk.copyOfRange(marker, fd + 1)
+                    if (rawScope.size >= 493) {
+                        scopeRaw27Frames++
+                        scopeLastRawFrameAtMs = System.currentTimeMillis()
+                        scopeCivFrames++
+                        processSpectrumScopeFrame(rawScope.copyOfRange(2, rawScope.size - 1))
+                        return
+                    }
+                }
+            }
+
+            consumeSerialCivChunk(chunk)
+            return
+        }
+    }
+
+    // =================================================================
+    // IC-705 SPECTRUM
+    // Spectrum-only display. No waterfall buffer or waterfall drawing.
+    //
+    // Native center-mode spans: 2.5/5/10/25/50/100/250/500 kHz.
+    // The requested 75 kHz display is a centered software crop of the
+    // 100 kHz radio waveform.
+    // =================================================================
+
+    private fun startSpectrumScope() {
+        if (!running || !serialOpen) {
+            return
+        }
+
+        if (scopeStarted) {
+            return
+        }
+
+        stopScopePolling()
+        resetScopeAssembly()
+
+        scopeTransportPackets = 0L
+        scopeCivFrames = 0L
+        scopeRaw27Frames = 0L
+        scopeDecodedFrames = 0L
+        scopeLastTransportAtMs = 0L
+        scopeLastRawFrameAtMs = 0L
+        scopeLastDecodedAtMs = 0L
+        scopePollCount = 0L
+        scopeAwaitingResponse = false
+        scopeLastUdpBytes = 0
+        scopeLastCivBytes = 0
+
+        // Mark the receiver active and display the scope first. The first
+        // waveform frames can arrive immediately after the radio's ON command.
+        scopeStarted = true
+        runOnUiThread {
+            scopeView.visibility = View.VISIBLE
+            sensitivityRow.visibility = View.VISIBLE
+            scopeToggleButton.text = "SPECTRUM OFF"
+        }
+        updateScopeInfo("Spectrum: turning scope ON before setting CENTER mode...")
+
+        try {
+            // Reset stale radio-side scope state after a radio reboot, then
+            // re-enable the scope and waveform before configuring CENTER.
+            appendLog("SCOPE START: clearing prior scope state.")
+            sendScopeCommand(byteArrayOf(0x27, 0x11, 0x00))
+            Thread.sleep(80)
+            sendScopeCommand(byteArrayOf(0x27, 0x10, 0x00))
+            Thread.sleep(150)
+
+            // Enable scope status and waveform output before configuring CENTER.
+            appendLog("SCOPE START: enabling scope status (CI-V 27 10 01).")
+            sendScopeCommand(byteArrayOf(0x27, 0x10, 0x01))
+            Thread.sleep(150)
+            appendLog("SCOPE START: enabling waveform data (CI-V 27 11 01).")
+            sendScopeCommand(byteArrayOf(0x27, 0x11, 0x01))
+            Thread.sleep(150)
+            updateScopeInfo("Spectrum: ON — applying CENTER mode...")
+
+            appendLog("SCOPE MODE: selecting CENTER (CI-V 27 14 00 00).")
+            val centerCommands = arrayOf(
+                byteArrayOf(0x27, 0x12, 0x00),
+                byteArrayOf(0x27, 0x13, 0x00),
+                byteArrayOf(0x27, 0x14, 0x00, 0x00),
+                buildScopeSpanCommand(100_000L)
+            )
+            for (cmd in centerCommands) {
+                sendScopeCommand(cmd)
+                Thread.sleep(80)
+            }
+            // No repeated 27 00 polling; the radio streams frames after both ON commands.
+        } catch (e: Exception) {
+            appendLog("SCOPE START/MODE ERROR: ${e.message}")
+            updateScopeInfo("Spectrum: ON — setup failed; press SPECTRUM OFF then ON to retry")
+            return
+        }
+
+        updateScopeInfo("Spectrum: ON — CENTER mode, receiving IC-705 scope frames")
+    }
+
+    private fun waterfallPaletteName(index: Int): String =
+        arrayOf("Blue", "Green", "Amber", "Purple", "Grayscale")[index.coerceIn(0, 4)]
+
+    private fun startSignalMeterPolling() {
+        signalMeterScheduler?.shutdownNow()
+        signalMeterScheduler =
+            Executors.newSingleThreadScheduledExecutor()
+
+        signalMeterScheduler?.scheduleAtFixedRate(
+            {
+                if (running && serialOpen) {
+                    try {
+                        sendRadioCommand(0x1C, 0x00)
+                        if (radioTransmitting) sendRadioCommand(0x15, 0x11) else sendCivReadSignalMeter()
+                        if (txWanted && lastPttReplyAt > 0L && System.currentTimeMillis() - lastPttReplyAt > 3000L)
+                            cancelTransmit("TX status link lost")
+                    } catch (e: Exception) {
+                        if (running) {
+                            appendLog(
+                                "S-METER READ ERROR: ${e.message}"
+                            )
+                        }
+                    }
+                }
+            },
+            100,
+            SIGNAL_METER_POLL_INTERVAL_MS,
+            TimeUnit.MILLISECONDS
+        )
+    }
+
+    private fun stopSignalMeterPolling() {
+        signalMeterScheduler?.shutdownNow()
+        signalMeterScheduler = null
+    }
+
+    private fun sendCivReadSignalMeter() {
+        val civ = byteArrayOf(
+            0xFE.toByte(),
+            0xFE.toByte(),
+            0xA4.toByte(),
+            0xE0.toByte(),
+            0x15.toByte(),
+            0x02.toByte(),
+            0xFD.toByte()
+        )
+        sendSerialTracked(
+            buildCivPacket(civ)
+        )
+    }
+
+    private fun stopScopePolling() {
+        scopePolling = false
+        scopeAwaitingResponse = false
+
+        try {
+            scopePollThread?.interrupt()
+        } catch (_: Exception) {
+        }
+
+        scopePollThread = null
+    }
+
+    private fun stopSpectrumScope() {
+        stopScopePolling()
+
+        try {
+            // Stop only waveform data output. Leave the physical IC-705
+            // scope display itself untouched.
+            if (running && serialOpen) {
+                sendScopeCommand(
+                    byteArrayOf(
+                        0x27.toByte(),
+                        0x11.toByte(),
+                        0x00.toByte()
+                    )
+                )
+            }
+        } catch (_: Exception) {
+        }
+
+        scopeStarted = false
+        resetScopeAssembly()
+
+        runOnUiThread {
+            if (::scopeView.isInitialized) {
+                scopeView.clearScope()
+                scopeView.visibility = View.GONE
+            }
+
+            if (::sensitivityRow.isInitialized) {
+                sensitivityRow.visibility = View.GONE
+            }
+
+            if (::scopeInfoText.isInitialized) {
+                scopeInfoText.text =
+                    "Spectrum: OFF — scope display removed to conserve data"
+            }
+
+            if (::scopeToggleButton.isInitialized) {
+                scopeToggleButton.text = "SPECTRUM ON"
+            }
+        }
+    }
+
+    private fun sendScopeBandwidthForDisplay(displayKHz: Int) {
+        val requestedTotalHz = displayKHz.toLong() * 1000L
+        val halfSpan = when {
+            requestedTotalHz <= 5_000L -> 2_500L
+            requestedTotalHz <= 10_000L -> 5_000L
+            requestedTotalHz <= 20_000L -> 10_000L
+            requestedTotalHz <= 50_000L -> 25_000L
+            requestedTotalHz <= 100_000L -> 50_000L
+            requestedTotalHz <= 200_000L -> 100_000L
+            requestedTotalHz <= 500_000L -> 250_000L
+            else -> 500_000L
+        }
+        sendScopeCommand(buildScopeSpanCommand(halfSpan))
+    }
+
+    private fun buildScopeSpanCommand(halfSpanHz: Long): ByteArray {
+        val civ = ByteArray(13)
+        civ[0] = 0xFE.toByte()
+        civ[1] = 0xFE.toByte()
+        civ[2] = 0xA4.toByte()
+        civ[3] = 0xE0.toByte()
+        civ[4] = 0x27.toByte()
+        civ[5] = 0x15.toByte()
+        civ[6] = 0x00.toByte()
+        encodeIcomFrequency(halfSpanHz, civ, 7)
+        civ[12] = 0xFD.toByte()
+        return civ
+    }
+
+    private fun sendScopeCommand(
+        command: ByteArray
+    ) {
+        if (!running || !serialOpen) {
+            return
+        }
+
+        // Scope toggles/mode selections are CI-V command bodies (27 xx ...),
+        // while the bandwidth builder already returns a complete CI-V frame.
+        // Match the tester: wrap command bodies in FE FE A4 E0 ... FD before
+        // placing them in the serial C1 transport envelope.
+        val isCompleteCivFrame = command.size >= 6 &&
+                (command[0].toInt() and 0xFF) == 0xFE &&
+                (command[1].toInt() and 0xFF) == 0xFE &&
+                (command[2].toInt() and 0xFF) == 0xA4 &&
+                (command[3].toInt() and 0xFF) == 0xE0 &&
+                (command.last().toInt() and 0xFF) == 0xFD
+        val civ = if (isCompleteCivFrame) {
+            command
+        } else {
+            ByteArray(command.size + 5).also { frame ->
+                frame[0] = 0xFE.toByte()
+                frame[1] = 0xFE.toByte()
+                frame[2] = 0xA4.toByte()
+                frame[3] = 0xE0.toByte()
+                command.copyInto(frame, 4)
+                frame[frame.lastIndex] = 0xFD.toByte()
+            }
+        }
+        appendLog("SCOPE CI-V TX: ${hex(civ)}")
+        sendSerialTracked(
+            buildCivPacket(civ)
+        )
+    }
+
+    private fun resetScopeAssembly() {
+        scopeAssemblyMainSub = 0
+        scopeAssemblyMode = 0
+        scopeAssemblyCenterHz = 0L
+        scopeAssemblySpanHz = 0L
+        scopeAssemblyOutOfRange = false
+        scopeAssemblyWaveform.reset()
+        synchronized(scopeCivReceiveBuffer) {
+            scopeCivReceiveBuffer.reset()
+        }
+        synchronized(scopeRawReceiveBuffer) {
+            scopeRawReceiveBuffer.reset()
+        }
+    }
+
+    private val scopeCivReceiveBuffer =
+        ByteArrayOutputStream()
+
+    private fun consumeSerialCivChunk(
+        chunk: ByteArray
+    ) {
+        if (chunk.isEmpty()) {
+            return
+        }
+
+        val startsRawScopeFrame =
+            chunk.size >= 2 &&
+                    (chunk[0].toInt() and 0xFF) == 0x27 &&
+                    (chunk[1].toInt() and 0xFF) == 0x00
+
+        // The IC-705 WLAN scope line is a raw 27 00 ... FD frame inside the
+        // C1 transport. Do NOT discard an incomplete first chunk. A line can
+        // be fragmented by the transport/network, so accumulate until FD.
+        if (startsRawScopeFrame || scopeRawReceiveBuffer.size() > 0) {
+            synchronized(scopeRawReceiveBuffer) {
+                if (startsRawScopeFrame) {
+                    scopeRawReceiveBuffer.reset()
+                }
+
+                scopeRawReceiveBuffer.write(
+                    chunk,
+                    0,
+                    chunk.size
+                )
+
+                while (true) {
+                    val bytes = scopeRawReceiveBuffer.toByteArray()
+                    if (bytes.size < 2) {
+                        return
+                    }
+
+                    // Find the first FD after a valid 27 00 start. Spectrum
+                    // waveform bytes are 0..160, so FD cannot occur inside
+                    // waveform data.
+                    var endIndex = -1
+                    for (i in 2 until bytes.size) {
+                        if ((bytes[i].toInt() and 0xFF) == 0xFD) {
+                            endIndex = i
+                            break
+                        }
+                    }
+
+                    if (endIndex < 0) {
+                        updateScopeInfo(
+                            "Spectrum: buffering 27 00 scope line — ${bytes.size} bytes"
+                        )
+                        return
+                    }
+
+                    val frame = bytes.copyOfRange(0, endIndex + 1)
+                    val remaining = bytes.copyOfRange(endIndex + 1, bytes.size)
+                    scopeRawReceiveBuffer.reset()
+                    if (remaining.isNotEmpty()) {
+                        scopeRawReceiveBuffer.write(
+                            remaining,
+                            0,
+                            remaining.size
+                        )
+                    }
+
+                    if (
+                        frame.size >= 4 &&
+                        (frame[0].toInt() and 0xFF) == 0x27 &&
+                        (frame[1].toInt() and 0xFF) == 0x00
+                    ) {
+                        scopeCivFrames++
+                        val payload =
+                            frame.copyOfRange(
+                                2,
+                                frame.size - 1
+                            )
+                        processSpectrumScopeFrame(payload)
+                    }
+
+                    if (scopeRawReceiveBuffer.size() == 0) {
+                        return
+                    }
+                }
+            }
+        }
+
+        // Split complete frames individually; retain a fragmented tail.
+        synchronized(civFrameBuffer) {
+            for (b in chunk) {
+                civFrameBuffer.add(b)
+                if (b == 0xFD.toByte()) {
+                    val start = (0 until civFrameBuffer.size - 1).firstOrNull {
+                        civFrameBuffer[it] == 0xFE.toByte() &&
+                            civFrameBuffer[it + 1] == 0xFE.toByte()
+                    }
+                    if (start != null && civFrameBuffer.size - start >= 6) {
+                        processCivFrame(civFrameBuffer.subList(start, civFrameBuffer.size).toByteArray())
+                    }
+                    civFrameBuffer.clear()
+                }
+                if (civFrameBuffer.size > 8192) civFrameBuffer.clear()
+            }
+        }
+    }
+
+    private fun processSpectrumScopeFrame(
+        payload: ByteArray
+    ) {
+        // payload begins immediately after raw 27 00 and does not include
+        // the final FD. For LAN scope data this contains the header plus 475
+        // waveform bytes.
+        if (payload.size < 15) {
+            appendLog(
+                "SCOPE 27 00 too short: payload=${payload.size}"
+            )
+            return
+        }
+
+        val mainSub =
+            payload[0].toInt() and 0xFF
+        val divCurrent =
+            payload[1].toInt() and 0xFF
+        val divMaximum =
+            payload[2].toInt() and 0xFF
+        val scopeMode =
+            payload[3].toInt() and 0xFF
+
+        if (divMaximum <= 1) {
+            // LAN: all waveform data arrives together.
+            if (scopeMode == 0) {
+                if (payload.size < 15 + 475) {
+                    appendLog(
+                        "SCOPE LAN frame incomplete: payload=${payload.size}"
+                    )
+                    return
+                }
+
+                val centerHz =
+                    decodeIcomFrequency(payload, 4)
+                val spanHz =
+                    decodeIcomFrequency(payload, 9)
+                val outOfRange =
+                    (payload[14].toInt() and 0xFF) != 0
+
+                if (outOfRange) {
+                    updateScopeInfo(
+                        "Spectrum: IC-705 reports scope OUT OF RANGE"
+                    )
+                    return
+                }
+
+                val waveform =
+                    payload.copyOfRange(
+                        15,
+                        minOf(15 + 475, payload.size)
+                    )
+
+                if (waveform.size < 475) {
+                    appendLog(
+                        "SCOPE waveform short: ${waveform.size}/475"
+                    )
+                    return
+                }
+
+                displayScopeWaveform(
+                    centerHz,
+                    spanHz,
+                    waveform
+                )
+                return
+            }
+
+            // Fixed-mode fallback: edge frequencies are at the same positions.
+            if (payload.size < 15 + 475) {
+                appendLog(
+                    "SCOPE fixed frame incomplete: payload=${payload.size}"
+                )
+                return
+            }
+
+            val lowerHz =
+                decodeIcomFrequency(payload, 4)
+            val upperHz =
+                decodeIcomFrequency(payload, 9)
+            val outOfRange =
+                (payload[14].toInt() and 0xFF) != 0
+
+            if (outOfRange) {
+                updateScopeInfo(
+                    "Spectrum: IC-705 reports scope OUT OF RANGE"
+                )
+                return
+            }
+
+            val waveform =
+                payload.copyOfRange(
+                    15,
+                    minOf(15 + 475, payload.size)
+                )
+
+            if (waveform.size < 475) {
+                return
+            }
+
+            val centerHz =
+                (lowerHz + upperHz) / 2L
+            val spanHz =
+                kotlin.math.abs(upperHz - lowerHz)
+
+            displayScopeWaveform(
+                centerHz,
+                spanHz,
+                waveform
+            )
+            return
+        }
+
+        // USB-style divided scope frames are also accepted, although the
+        // IC-705 LAN reference specifies division maximum = 01 on LAN.
+        if (divCurrent == 1) {
+            if (payload.size < 15) {
+                return
+            }
+
+            scopeAssemblyMainSub = mainSub
+            scopeAssemblyMode = scopeMode
+            scopeAssemblyOutOfRange =
+                (payload[14].toInt() and 0xFF) != 0
+            scopeAssemblyWaveform.reset()
+
+            if (scopeMode == 0) {
+                scopeAssemblyCenterHz =
+                    decodeIcomFrequency(payload, 4)
+                scopeAssemblySpanHz =
+                    decodeIcomFrequency(payload, 9)
+            } else {
+                val lowerHz =
+                    decodeIcomFrequency(payload, 4)
+                val upperHz =
+                    decodeIcomFrequency(payload, 9)
+                scopeAssemblyCenterHz =
+                    (lowerHz + upperHz) / 2L
+                scopeAssemblySpanHz =
+                    kotlin.math.abs(upperHz - lowerHz)
+            }
+            return
+        }
+
+        if (scopeAssemblyOutOfRange) {
+            return
+        }
+
+        if (divCurrent >= 2) {
+            if (payload.size > 3) {
+                scopeAssemblyWaveform.write(
+                    payload,
+                    3,
+                    payload.size - 3
+                )
+            }
+        }
+
+        if (divCurrent >= divMaximum) {
+            val waveform =
+                scopeAssemblyWaveform.toByteArray()
+
+            if (waveform.size >= 475) {
+                displayScopeWaveform(
+                    scopeAssemblyCenterHz,
+                    scopeAssemblySpanHz,
+                    waveform.copyOf(475)
+                )
+            }
+
+            resetScopeAssembly()
+        }
+    }
+
+    private fun displayScopeWaveform(centerHz: Long, spanHz: Long, waveform: ByteArray) {
+        if (waveform.size < 475) return
+        val displayKhz = requestedDisplayBandwidthKHz.coerceIn(5, 1000)
+        val totalSpanHz = if (spanHz > 0L) spanHz * 2L else 100_000L
+        val visibleHz = minOf(displayKhz.toLong() * 1000L, totalSpanHz)
+        val count = (475.0 * visibleHz.toDouble() / totalSpanHz.toDouble()).toInt().coerceIn(24, 475)
+        val startIndex = ((475 - count) / 2).coerceAtLeast(0)
+        val samples = IntArray(count)
+        for (i in 0 until count) samples[i] = waveform[startIndex + i].toInt() and 0xFF
+        scopeDecodedFrames++
+        scopeLastDecodedAtMs = System.currentTimeMillis()
+        scopeUiUpdateCounter++
+        if (::scopeView.isInitialized) scopeView.updateSpectrum(centerHz, totalSpanHz, samples)
+        if (scopeUiUpdateCounter % 10L == 0L) {
+            val viewText = String.format(java.util.Locale.US, "%.1f kHz", visibleHz / 1000.0)
+            updateScopeInfo("Spectrum: LIVE — frames=$scopeDecodedFrames center=${formatFrequency(centerHz)} view=$viewText C1=$scopeTransportPackets")
+        }
+    }
+
+    private fun updateScopeInfo(
+        text: String
+    ) {
+        if (!::scopeInfoText.isInitialized) {
+            return
+        }
+
+        runOnUiThread {
+            if (::scopeInfoText.isInitialized) {
+                scopeInfoText.text = text
+            }
+        }
+    }
+
+    private fun updateSignalMeter(value: Int) {
+        if (radioTransmitting || txWanted) return
+        val clamped = value.coerceIn(0, 255)
+        val meterText = if (clamped <= 120) {
+            val sLevel = kotlin.math.min(9, (clamped * 9 + 60) / 120)
+            "Signal: S$sLevel"
+        } else {
+            val dbAboveS9 = ((((clamped - 120) * 40f) / 135f / 5f)
+                .roundToInt().coerceIn(1, 8)) * 5
+            "Signal: S9 +$dbAboveS9"
+        }
+
+
+        runOnUiThread {
+            if (radioTransmitting || txWanted) return@runOnUiThread
+            if (::signalMeterLabel.isInitialized) {
+                signalMeterLabel.text = meterText
+            }
+            if (::signalMeterBar.isInitialized) {
+                signalMeterBar.progress = clamped
+                signalMeterBar.progressTintList = ColorStateList.valueOf(
+                    if (clamped > 120) Color.rgb(220, 0, 0) else Color.rgb(0, 190, 0)
+                )
+            }
+        }
+    }
+
+    private fun processCivFrame(
+        civ: ByteArray
+    ) {
+        if (civ.size < 2) {
+            return
+        }
+
+        handleTxReply(civ)
+        appendLog("CI-V FRAME RX: ${hex(civ)}")
+
+        // Raw IC-705 WLAN scope form: 27 00 ... FD. The user's working
+        // capture proves this exact form is what arrives inside C1.
+        if (civ.size >= 493 &&
+            (civ[0].toInt() and 0xFF) == 0x27 &&
+            (civ[1].toInt() and 0xFF) == 0x00 &&
+            (civ[civ.size - 1].toInt() and 0xFF) == 0xFD) {
+            scopeCivFrames++
+            scopeRaw27Frames++
+            scopeLastRawFrameAtMs = System.currentTimeMillis()
+            processSpectrumScopeFrame(civ.copyOfRange(2, civ.size - 1))
+            return
+        }
+
+        // Full framed scope form: FE FE E0 A4 27 00 ... FD.
+        if (civ.size >= 493 &&
+            (civ[0].toInt() and 0xFF) == 0xFE &&
+            (civ[1].toInt() and 0xFF) == 0xFE &&
+            (civ[2].toInt() and 0xFF) == 0xE0 &&
+            (civ[3].toInt() and 0xFF) == 0xA4 &&
+            (civ[4].toInt() and 0xFF) == 0x27 &&
+            (civ[5].toInt() and 0xFF) == 0x00 &&
+            (civ[civ.size - 1].toInt() and 0xFF) == 0xFD) {
+            scopeCivFrames++
+            processSpectrumScopeFrame(civ.copyOfRange(6, civ.size - 1))
+            return
+        }
+
+        // CI-V echo of our frequency-set command.
+        if (
+            civ.size >= 12 &&
+            (civ[0].toInt() and 0xFF) == 0xFE &&
+            (civ[1].toInt() and 0xFF) == 0xFE &&
+            (civ[2].toInt() and 0xFF) == 0xA4 &&
+            (civ[3].toInt() and 0xFF) == 0xE0 &&
+            (civ[4].toInt() and 0xFF) == 0x25 &&
+            (civ[5].toInt() and 0xFF) == 0x00 &&
+            (civ[civ.size - 1].toInt() and 0xFF) == 0xFD
+        ) {
+            appendLog("CI-V SET MAIN VFO echo received")
+            return
+        }
+
+        // IC-705 selected/main VFO frequency response:
+        // FE FE E0 A4 25 00 [5 BCD bytes] FD
+        if (
+            civ.size >= 12 &&
+            (civ[0].toInt() and 0xFF) == 0xFE &&
+            (civ[1].toInt() and 0xFF) == 0xFE &&
+            (civ[2].toInt() and 0xFF) == 0xE0 &&
+            (civ[3].toInt() and 0xFF) == 0xA4 &&
+            (civ[4].toInt() and 0xFF) == 0x25 &&
+            (civ[5].toInt() and 0xFF) == 0x00 &&
+            (civ[civ.size - 1].toInt() and 0xFF) == 0xFD
+        ) {
+            val hz = decodeIcomFrequency(civ, 6)
+
+            if (hz > 0L) {
+                frequencyHz = hz
+                frequencyWriteResponseReceived = true
+                displayRadioFrequency(hz)
+                appendLog(
+                    "IC-705 MAIN VFO RESPONSE: ${formatFrequency(hz)}"
+                )
+            } else {
+                appendLog("CI-V MAIN VFO frequency decode failed.")
+            }
+            return
+        }
+
+        // Selected/main VFO mode response:
+        // FE FE E0 A4 26 00 <MODE> <DATA> <FILTER> FD
+        if (
+            civ.size >= 10 &&
+            (civ[0].toInt() and 0xFF) == 0xFE &&
+            (civ[1].toInt() and 0xFF) == 0xFE &&
+            (civ[2].toInt() and 0xFF) == 0xE0 &&
+            (civ[3].toInt() and 0xFF) == 0xA4 &&
+            (civ[4].toInt() and 0xFF) == 0x26 &&
+            (civ[5].toInt() and 0xFF) == 0x00 &&
+            (civ[civ.size - 1].toInt() and 0xFF) == 0xFD
+        ) {
+            val modeCode =
+                civ[6].toInt() and 0xFF
+
+            val dataMode =
+                if (civ.size >= 9) {
                     civ[7].toInt() and 0xFF
                 } else {
                     0
