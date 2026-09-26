@@ -1,0 +1,171 @@
+{
+  "version": "v28.41",
+  "source_sha256": "dea0b81e55ac1665612ed58ea7edfda3794c317974d9fa31dfdc3fce3511527c",
+  "files": [
+    {
+      "path": ".gitignore",
+      "sha256": "703238443066325af08e3868d1e4b571a633baf68fcc93e323f0066999a97e1b"
+    },
+    {
+      "path": "app\\.gitignore",
+      "sha256": "5c3174b74edc6f2b9e0743594b8bd3c7f31e4f4405758cc9872b3fe1de1d28b4"
+    },
+    {
+      "path": "app\\build.gradle.kts",
+      "sha256": "c4ff429c11c6967cdd0bf5da985604dd83021530a53dea23f0117e703302d993"
+    },
+    {
+      "path": "app\\src\\androidTest\\java\\com\\example\\ic_705remote2\\ExampleInstrumentedTest.kt",
+      "sha256": "da64decd34e844b50cfd9b8deddc29dc83530d3fdbaf94a0e6361651a7261312"
+    },
+    {
+      "path": "app\\src\\main\\AndroidManifest.xml",
+      "sha256": "335b13e647b557a10064741dc92a8d620af073be428c04cbbc7eff98a4f93377"
+    },
+    {
+      "path": "app\\src\\main\\java\\com\\example\\ic_705remote2\\MainActivity.kt",
+      "sha256": "dea0b81e55ac1665612ed58ea7edfda3794c317974d9fa31dfdc3fce3511527c"
+    },
+    {
+      "path": "app\\src\\main\\java\\com\\example\\ic_705remote2\\ui\\theme\\Color.kt",
+      "sha256": "403916c6d4cdf36c10e2ec414b088180548d0282536cea94afd27ef0e9852d97"
+    },
+    {
+      "path": "app\\src\\main\\java\\com\\example\\ic_705remote2\\ui\\theme\\Theme.kt",
+      "sha256": "2a70a84746c949c9152ff28263e3298e1344476f28fdd9e3ec064b1791695994"
+    },
+    {
+      "path": "app\\src\\main\\java\\com\\example\\ic_705remote2\\ui\\theme\\Type.kt",
+      "sha256": "6c1b881623ed2cce70daf7b6ed193e342a82473f3d4bfd87ea9b6cd79daa0f3f"
+    },
+    {
+      "path": "app\\src\\main\\keepRules\\rules.keep",
+      "sha256": "cd9f36ade2d8604e1b7cf24eff5b171f9c0816c0aa013ba7eb55be4fe2e1dac7"
+    },
+    {
+      "path": "app\\src\\main\\res\\drawable\\ic_launcher_background.xml",
+      "sha256": "ed423c73a6f40a4d2909f0901e60527b3a807cd59e1b5593bcaae1808b1c6321"
+    },
+    {
+      "path": "app\\src\\main\\res\\drawable\\ic_launcher_foreground.xml",
+      "sha256": "01d1a6a6c1234eb7fe270d097eb283d72b9c95ae5118886f1b6573aad280f1f7"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-anydpi\\ic_launcher.xml",
+      "sha256": "88f7653499ef524126ea5018a99baf9cc3269e7e584d6205dfdd76db39f39cc0"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-anydpi\\ic_launcher_round.xml",
+      "sha256": "88f7653499ef524126ea5018a99baf9cc3269e7e584d6205dfdd76db39f39cc0"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-hdpi\\ic_launcher.webp",
+      "sha256": "dd00996198640ed28fbc09cdcd7a3807cf8707f3eb255b659634da3ca6a6ff01"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-hdpi\\ic_launcher_round.webp",
+      "sha256": "1ed73f5341a69d3b41c7e02e126803f50cc8c3284adf4bbb737f0c93577aef07"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-mdpi\\ic_launcher.webp",
+      "sha256": "846219e6f72fe9a6c104ca8919cbee36a101e7d2ff8da9da67b689a5888f060d"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-mdpi\\ic_launcher_round.webp",
+      "sha256": "4e2c58b91de01130e6479e00cbbaaf6e77cd961dd2c8e303cf13cd077fa92632"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-xhdpi\\ic_launcher.webp",
+      "sha256": "398340dad816fc9a6338cb151a8cf1e45b926f9bfb70628b24c4bd2523cc94d4"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-xhdpi\\ic_launcher_round.webp",
+      "sha256": "91b490aef86574901137f0a252272e1f1add99c1ad709e0696ed68929b88d261"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-xxhdpi\\ic_launcher.webp",
+      "sha256": "58ae87fa0c5b5d1562d27fd648d2c061553fe20e3ed570bde588162d01ea7a27"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-xxhdpi\\ic_launcher_round.webp",
+      "sha256": "3009fad079f5772f30ecd767f98924367fbe0f81c30048d672d4fda2d5ca7d12"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-xxxhdpi\\ic_launcher.webp",
+      "sha256": "f98fef5bc3bfe5b65692c40ad1cbae2bec4faf9f1b249c397626740db71b62d8"
+    },
+    {
+      "path": "app\\src\\main\\res\\mipmap-xxxhdpi\\ic_launcher_round.webp",
+      "sha256": "5faf033745c8c882c43bb1b372d4e4a5890caec63d9892a2e756c954108b85dc"
+    },
+    {
+      "path": "app\\src\\main\\res\\values\\colors.xml",
+      "sha256": "b5626527d503417f0d8e5b1e08f338de7b31173bf0e122815f03e64932adbd88"
+    },
+    {
+      "path": "app\\src\\main\\res\\values\\strings.xml",
+      "sha256": "de1dcf2e0b878b260e3b805c7919b98f6b4109ddb5add635cef1b278cbcaa3e0"
+    },
+    {
+      "path": "app\\src\\main\\res\\values\\themes.xml",
+      "sha256": "1e9be70f4447b97808240c02e0edabf2bfc5db24a5f90b215fd427bc8955a7a8"
+    },
+    {
+      "path": "app\\src\\main\\res\\xml\\backup_rules.xml",
+      "sha256": "6cf1a27e6807b1d24e41d3fbe7ddc1bfe1f42226027964f6eaf477d71b43b283"
+    },
+    {
+      "path": "app\\src\\main\\res\\xml\\data_extraction_rules.xml",
+      "sha256": "cb1fc47ab4a984530ed60e0e6ee638929c3038290e7e7e0b4b03a3a30fbe7381"
+    },
+    {
+      "path": "app\\src\\test\\java\\com\\example\\ic_705remote2\\AuthRenewalReplyTest.kt",
+      "sha256": "94b7c7ead6bc0dc1a763d7aae833d6ae4a9f9bc7cb58c28a1eb6848f2de1dbaf"
+    },
+    {
+      "path": "app\\src\\test\\java\\com\\example\\ic_705remote2\\ExampleUnitTest.kt",
+      "sha256": "63bc5e966ccd08abed5729ca3a3f085995918fd4cbc22b5493ea1e38727989fd"
+    },
+    {
+      "path": "app\\src\\test\\java\\com\\example\\ic_705remote2\\TxWireTest.kt",
+      "sha256": "44fe16ff4cd6c64798bbdcea40fae1fb6416a064150489dbb2d1f6c1a90ec7a5"
+    },
+    {
+      "path": "build.gradle.kts",
+      "sha256": "be7dbfa1841b18b020f744e203b995d3dac5709c2a6b8e310fbcfaed0364919a"
+    },
+    {
+      "path": "gradle\\gradle-daemon-jvm.properties",
+      "sha256": "6c13aa5ba36690ccfbbb25a8807d01d98c15833e446d7ae82ddc726472cb8ef7"
+    },
+    {
+      "path": "gradle\\libs.versions.toml",
+      "sha256": "48cfaf09d44f98cb4528a1fce90b01318eed9ffb82bb53cf093a0bdc2b8b7a42"
+    },
+    {
+      "path": "gradle\\wrapper\\gradle-wrapper.jar",
+      "sha256": "76805e32c009c0cf0dd5d206bddc9fb22ea42e84db904b764f3047de095493f3"
+    },
+    {
+      "path": "gradle\\wrapper\\gradle-wrapper.properties",
+      "sha256": "a0b970a98c3fc96bb74197a659dd00b3a889e59ba8935cf32d1129f651ede139"
+    },
+    {
+      "path": "gradle.properties",
+      "sha256": "ec5846573fad7f65edc8f3437f74bd58068f9254c10fe8fa0a6346c651066111"
+    },
+    {
+      "path": "gradlew",
+      "sha256": "3238afb2aed5cb16eb7d6718077e7138059108f007b54179e9cc157c5a6e0e89"
+    },
+    {
+      "path": "gradlew.bat",
+      "sha256": "1d297e00bd21de3ace22b4d7f2de1f9dfa858883d66bbf7c1ccbecccec8f4f3b"
+    },
+    {
+      "path": "settings.gradle.kts",
+      "sha256": "f617477885805f5eacc38b12b107342f5fc6f7b3d1bcfb3964785ebf4a2ca506"
+    }
+  ],
+  "note": "Exact current local project/source snapshot. Private signing keys, local.properties, caches and generated build outputs excluded. No code edited while checkpointing. Existing Gradle debug signing references the excluded local debug.keystore; supply your own signing key when building."
+}

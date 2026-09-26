@@ -1,13 +1,13 @@
-# IC-705-Remote-Android
+# IC-705 Remote Android
 
-## Latest source release: v28.40
+## Current checkpoint: v28.41
 
-[Download v28.40](https://github.com/WA3O/IC-705-Remote-Android/releases/tag/v28.40) | [Complete source](checkpoints/v28.40/MainActivity.kt) | [Copy-and-paste text](checkpoints/v28.40/MainActivity.txt) | [Full changelog](CHANGELOG.md)
+[Complete v28.41 project and source](checkpoints/v28.41/) | [Restore instructions](checkpoints/v28.41/README.md) | [Complete feature guide](FEATURES.md) | [Full changelog](CHANGELOG.md)
 
-Includes microphone TX, a red TX toggle with a 180-second limit, power/microphone/squelch sliders, four saved web links, ASCII labels, and quiet automatic stream recovery. Retains LAN/WAN selection, wake/standby controls, swipe tuning and v28.37 display behavior.
+v28.41 renews authentication every minute to address the observed roughly 92-second audio/spectrum interruption. The live test recorded 17 successful renewals over 17 minutes 18 seconds, no recovery events, and no audible breakups reported by the user.
 
-This is a source release, not an APK or full Android Studio project. Replace your existing MainActivity.kt; keep RECORD_AUDIO and INTERNET permissions. See the [release instructions](checkpoints/v28.40/README.md) and included basic manifest. Historical source files are archival alternatives, not additional classes to compile together.
+Includes receive audio, spectrum/waterfall, frequency and band controls, microphone TX with a 180-second limit, power/microphone/squelch sliders, LAN/WAN settings and four locally saved web links. Fresh-install connection fields and links are blank. The separate v28.38 marker-spacing experiment is not included.
 
-The Android debug build and all five existing unit tests passed. The user confirmed microphone operation; live radio recovery remains untested. The separate v28.38 marker-spacing experiment is documented in the changelog and is not included.
+This checkpoint preserves the complete current project/source and excludes private keys and machine-specific files. See restore instructions for local SDK and signing configuration. It contains no installable APK. Earlier published releases remain under [Releases](https://github.com/WA3O/IC-705-Remote-Android/releases).
 
-Earlier releases and checkpoints remain available.
+Historical source alternatives outside the checkpoint project are archival and must not be compiled together as duplicate classes.

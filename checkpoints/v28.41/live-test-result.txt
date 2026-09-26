@@ -1,0 +1,16 @@
+v28.41 live radio test - September 26, 2026
+
+User reports no audible breakups throughout the 15-minute listening test.
+Final USB Logcat check succeeded after the earlier scheduled-check restriction.
+Same app session: 03:53:53.845 to 04:11:12.087 (17 minutes 18 seconds).
+17 authentication renewal acknowledgements.
+0 authentication renewal timeouts.
+0 network recovery events.
+0 audio recovery events.
+0 logged audio playback errors.
+Latest stream diagnostic: connected=true, audioRunning=true, audioWriteErrors=0.
+The separate continuous capture ran 600.02 seconds with 10 renewal ACKs and no trigger.
+
+This successful run strongly supports missing authentication renewal as the cause
+of the previously observed roughly 92-second reconnect cycle. It does not prove
+that unrelated network dropouts cannot occur. Buffering was unchanged.
