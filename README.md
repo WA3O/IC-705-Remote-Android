@@ -1,5 +1,9 @@
 # IC-705 Remote Android
 
+## Current interface
+
+![IC-705 Remote Control Android app](codex-clipboard-fe821990-ccf3-47f6-8148-7eef034ea433.png)
+
 ## Current milestone: v28.45
 
 [Complete project and restore instructions](checkpoints/v28.45/) | [Feature guide](FEATURES.md) | [Changelog](CHANGELOG.md)
